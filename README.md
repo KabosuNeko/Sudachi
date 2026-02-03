@@ -12,17 +12,6 @@ Bộ công cụ này bao gồm:
 ## Preview
 <img width="1920" height="1080" alt="abc" src="https://github.com/user-attachments/assets/b4012097-2b3a-4475-aa8d-47455c6d43ec" />
 
-
-## 🎨 Giao diện: FZF Riced
-
-Công cụ này biến terminal của bạn thành một rạp phim thu nhỏ với giao diện cửa sổ nổi, loại bỏ sự lộn xộn của các công cụ CLI truyền thống.
-
-**Điểm nổi bật:**
-
-1.  🛍️ **Cửa sổ nổi (Floating Window):** Menu hiển thị lơ lửng ở chính giữa với các viền bo tròn, tạo cảm giác hiện đại.
-2.  🖼️ **Xem trước hình ảnh:** Sử dụng `chafa` để tải poster anime độ phân giải cao ngay lập tức khi bạn lướt qua danh sách.
-3.  ✨ **Nerd Fonts:** Tích hợp đầy đủ các icon để mang lại trải nghiệm trực quan và liền mạch.
-
 ---
 
 ## 🧩 Yêu cầu hệ thống (Dependencies)
