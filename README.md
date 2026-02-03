@@ -12,7 +12,8 @@ This tool suite includes:
 
 ## Preview
 
-<img width="1920" height="1080" alt="2026-01-17_23-32" src="https://github.com/user-attachments/assets/aa500a25-4b0d-4810-9850-977753e77331" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/26f49fcc-6eec-4ec9-925c-ca23f8af0927" />
+
 
 
 ## 🎨 Interface: Riced FZF
