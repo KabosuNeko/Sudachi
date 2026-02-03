@@ -111,7 +111,7 @@ The script auto-generates configuration files at `~/.config/sudachi`.
 
 ## 🙏 Credits
 
-- **[PhimAPI](https://phimapi.com)** & **[Ophim](https://ophim.cc)** - API.
+- **[PhimAPI](https://phimapi.com)** - API.
 - **[FZF](https://github.com/junegunn/fzf)** - Command-line fuzzy finder.
 
 ---
