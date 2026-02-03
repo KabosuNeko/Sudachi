@@ -1,54 +1,49 @@
 # Sudachi Player
 
-My personal CLI Vietsub Media Watcher configuration, focused on aesthetics, speed, and minimalism for Linux users.
+Trình phát Phim Vietsub dành cho người dùng Linux.
 
-## 📋 Overview
+## 📋 Tổng quan
 
-This tool suite includes:
-- **Sudachi CLI** script with a heavily "Riced" FZF interface.
-- **Multi-Source Engine** automatically switching between PhimAPI, Ophim.
-- **Image Preview** integration directly in the terminal.
-- Optimized **MPV** streaming & **yt-dlp** downloading configuration.
+Bộ công cụ này bao gồm:
+- **Sudachi.sh**: Script với giao diện FZF được "Gạo".
+- **Xem trước hình ảnh**: Tích hợp hiển thị ảnh ngay trong terminal.
+- Tối ưu hóa cấu hình **MPV** để xem phim & **yt-dlp** để tải xuống.
 
 ## Preview
-
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/26f49fcc-6eec-4ec9-925c-ca23f8af0927" />
-
+<img width="1920" height="1080" alt="abc" src="https://github.com/user-attachments/assets/b4012097-2b3a-4475-aa8d-47455c6d43ec" />
 
 
-## 🎨 Interface: Riced FZF
+## 🎨 Giao diện: FZF Riced
 
-This tool transforms your terminal into a mini cinema browser with a floating window interface, removing the clutter of traditional CLI tools.
+Công cụ này biến terminal của bạn thành một rạp phim thu nhỏ với giao diện cửa sổ nổi, loại bỏ sự lộn xộn của các công cụ CLI truyền thống.
 
-**Highlights:**
+**Điểm nổi bật:**
 
-1.  🛍️ **Floating Window:** The menu floats in the center with rounded borders, creating a modern look.
-2.  🖼️ **Image Preview:** Uses `chafa` to load high-res anime posters instantly as you scroll.
-3.  ✨ **Nerd Fonts:** Fully integrated icons for a visual and seamless experience.
+1.  🛍️ **Cửa sổ nổi (Floating Window):** Menu hiển thị lơ lửng ở chính giữa với các viền bo tròn, tạo cảm giác hiện đại.
+2.  🖼️ **Xem trước hình ảnh:** Sử dụng `chafa` để tải poster anime độ phân giải cao ngay lập tức khi bạn lướt qua danh sách.
+3.  ✨ **Nerd Fonts:** Tích hợp đầy đủ các icon để mang lại trải nghiệm trực quan và liền mạch.
 
 ---
 
-## 🧩 Dependencies
+## 🧩 Yêu cầu hệ thống (Dependencies)
 
-To run Sudachi properly, your system needs the following packages:
+Để chạy Sudachi, bạn cần cài đặt các gói sau:
 
-### 1. Core (Required)
-* **[fzf](https://github.com/junegunn/fzf)**: The heart of the interface. Used for fuzzy finding and menu rendering.
-* **[jq](https://stedolan.github.io/jq/)**: JSON processor, required to parse API data.
-* **[mpv](https://mpv.io/)**: The best media player for Linux. Used for streaming.
-* **[curl](https://curl.se/)**: For fetching API data.
+### 1. Cốt lõi (Bắt buộc)
+* **[fzf](https://github.com/junegunn/fzf)**: Trái tim của giao diện. Dùng để tìm kiếm mờ (fuzzy finding) và hiển thị menu.
+* **[jq](https://stedolan.github.io/jq/)**: Bộ xử lý JSON, cần thiết để đọc dữ liệu từ API.
+* **[mpv](https://mpv.io/)**: Trình phát media tốt nhất cho Linux. Dùng để stream phim.
+* **[curl](https://curl.se/)**: Dùng để tải dữ liệu từ API.
 
-### 2. Utilities (Highly Recommended)
-* **[chafa](https://github.com/hpjansson/chafa)**: Terminal graphics. Required for **Image Preview**.
-* **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** & **[aria2](https://github.com/aria2/aria2)**: Required for multi-threaded high-speed downloading.
+### 2. Tiện ích (Rất khuyên dùng)
+* **[chafa](https://github.com/hpjansson/chafa)**: Đồ họa Terminal. Bắt buộc nếu muốn có tính năng **Xem trước hình ảnh**.
+* **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** & **[aria2](https://github.com/aria2/aria2)**: Cần thiết để hỗ trợ tải xuống đa luồng tốc độ cao.
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Cài đặt
 
-### 1. Install Dependencies
-
-Select your distribution below to install the required packages.
+Chọn bản phân phối (distro) của bạn bên dưới để cài đặt các gói cần thiết.
 
 #### 🐧 Arch Linux / Arch-Based
 ```bash
@@ -60,8 +55,8 @@ sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify
 sudo apt update
 sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa
 
-# Note: The 'yt-dlp' version in apt is often outdated.
-# We recommend installing the latest binary:
+# Lưu ý: Phiên bản 'yt-dlp' trong apt thường bị lỗi thời.
+# Bạn nên cài đặt bản binary mới nhất theo cách sau:
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
@@ -71,48 +66,53 @@ sudo chmod a+rx /usr/local/bin/yt-dlp
 sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify
 ```
 
-### 2. Run Script
+### 2. Chạy Script
 
-**Run it directly**
+**Chạy trực tiếp**
 ```bash
 bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"
 ```
 
-**Alias**
+**Tạo Alias (Lệnh tắt)**
 ```bash
-# You can alias it in your shell by
+# Bạn có thể tạo alias trong shell (như .bashrc hoặc .zshrc)
 alias sudachi='bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"'
-# Now you can run 'sudachi' from anywhere
+
+# Bây giờ bạn chỉ cần gõ 'sudachi' từ bất cứ đâu để chạy
 ```
 
 ---
 
-## 🎮 Controls
+## 🎮 Điều khiển
 
-Inside the Episode Selection menu:
+Bên trong menu Chọn Tập Phim:
 
-| Key | Action |
+| Phím | Hành động |
 | :--- | :--- |
-| **`ENTER`** | ▶️ **Stream** (Open MPV) |
-| **`TAB`** | ⬇️ **Download** (Save to `~/Downloads/Sudachi-Downloaded`) |
-| **`CTRL + F`** | ❤️ Add to **Favorites** |
-| **`ESC`** | 🔙 Back / Exit |
+| **`ENTER`** | ▶️ **Xem phim** (Mở MPV) |
+| **`TAB`** | ⬇️ **Tải xuống** (Lưu vào `~/Downloads/Sudachi-Downloaded`) |
+| **`CTRL + F`** | ❤️ Thêm vào **Yêu thích** |
+| **`ESC`** | 🔙 Quay lại / Thoát |
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Config
 
-The script auto-generates configuration files at `~/.config/sudachi`.
+Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config/sudachi`.
 
-- **History:** `~/.config/sudachi/history.log`
-- **Favorites:** `~/.config/sudachi/favorites.log`
-- **Download Dir:** `~/Downloads/Sudachi-Downloaded` (Edit script to change)
+- **Lịch sử xem:** `~/.config/sudachi/history.log`
+- **Danh sách yêu thích:** `~/.config/sudachi/favorites.log`
+- **Thư mục tải xuống:** `~/Downloads/Sudachi-Downloaded`
 
 ---
 
 ## 🙏 Credits
 
-- **[PhimAPI](https://phimapi.com)** - API.
-- **[FZF](https://github.com/junegunn/fzf)** - Command-line fuzzy finder.
+- **[PhimAPI](https://phimapi.com)** - Cung cấp API phim.
+- **[FZF](https://github.com/junegunn/fzf)** - Công cụ tìm kiếm mờ dòng lệnh.
 
 ---
+
+## License
+
+Dự án này được cấp phép theo giấy phép **GNU General Public License v3.0**. Xem file [LICENSE](LICENSE) để biết thêm chi tiết.
