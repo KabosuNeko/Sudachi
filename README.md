@@ -115,4 +115,4 @@ Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config
 
 ## License
 
-Dự án này được cấp phép theo giấy phép **GNU General Public License v3.0**. Xem file [LICENSE](LICENSE) để biết thêm chi tiết.
+Dự án này được phân phối dưới giấy phép **MIT License**. Xem file [LICENSE](LICENSE) để biết thêm thông tin.
