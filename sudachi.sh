@@ -1,4 +1,9 @@
 #!/bin/bash
+#
+# Sudachi Player
+# Copyright (c) 2026 KabosuNeko
+# SPDX-License-Identifier: MIT
+#
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
