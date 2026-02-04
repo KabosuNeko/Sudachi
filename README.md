@@ -22,7 +22,7 @@ Bộ công cụ này bao gồm:
 ### 1. Cốt lõi (Bắt buộc)
 * **[fzf](https://github.com/junegunn/fzf)**: Trái tim của giao diện. Dùng để tìm kiếm mờ (fuzzy finding) và hiển thị menu.
 * **[jq](https://stedolan.github.io/jq/)**: Bộ xử lý JSON, cần thiết để đọc dữ liệu từ API.
-* **[mpv](https://mpv.io/)**: Trình phát media tốt nhất cho Linux. Dùng để stream phim.
+* **[mpv](https://mpv.io/) or [vlc](https://www.videolan.org/)**: Trình phát media. Dùng để stream phim.
 * **[curl](https://curl.se/)**: Dùng để tải dữ liệu từ API.
 
 ### 2. Tiện ích (Rất khuyên dùng)
@@ -37,13 +37,21 @@ Chọn bản phân phối (distro) của bạn bên dưới để cài đặt c�
 
 #### 🐧 Arch Linux / Arch-Based
 ```bash
-sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify
+sudo pacman -S fzf jq curl yt-dlp chafa aria2 libnotify
+# Mpv
+sudo pamcan -S mpv
+# Vlc
+sudo pamcan -S vlc
 ```
 
 #### 🍥 Debian / Ubuntu / Kali Linux / Linux Mint
 ```bash
 sudo apt update
-sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa
+sudo apt install fzf jq curl aria2 libnotify-bin chafa
+# Mpv
+sudo apt install mpv
+# Vlc
+sudo apt install vlc
 
 # Lưu ý: Phiên bản 'yt-dlp' trong apt thường bị lỗi thời.
 # Bạn nên cài đặt bản binary mới nhất theo cách sau:
@@ -53,7 +61,12 @@ sudo chmod a+rx /usr/local/bin/yt-dlp
 
 #### 🎩 Fedora / RHEL / CentOS
 ```bash
-sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify
+sudo dnf install fzf jq curl yt-dlp chafa aria2 libnotify
+
+# Mpv
+sudo dnf install mpv
+# Vlc
+sudo dnf install vlc
 ```
 
 ### 2. Chạy Script
@@ -98,7 +111,7 @@ Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config
 
 ## 🙏 Credits
 
-- **[PhimAPI](https://phimapi.com)** - Cung cấp API phim.
+- **[PhimAPI](https://phimapi.com), [OPhim](https://ophim.cc), [NguonC](https://nguonc.com)** - Cung cấp API phim.
 - **[FZF](https://github.com/junegunn/fzf)** - Công cụ tìm kiếm mờ dòng lệnh.
 
 ---
