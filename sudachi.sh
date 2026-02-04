@@ -6,6 +6,8 @@ HIST="$CONF/history.log"
 FAV="$CONF/favorites.log"
 CACHE="$CONF/cache"
 SOURCE_FILE="$CONF/source.conf"
+CONFIG_FILE="$CONF/config"
+PLAYER_DEFAULT="mpv"
 
 mkdir -p "$CONF" "$DL" "$CACHE"
 [ ! -f "$HIST" ] && touch "$HIST"
@@ -17,6 +19,7 @@ API_NGUONC="https://phim.nguonc.com"
 API_OPHIM1="https://ophim1.com"
 
 [ -f "$SOURCE_FILE" ] && API_SOURCE=$(cat "$SOURCE_FILE")
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
 I_SEARCH="󱇓 "
 I_NEW="󰎁 "
@@ -24,7 +27,9 @@ I_BROWSE="󰖟 "
 I_FILTER="󱄤 "
 I_HIST="󰋚 "
 I_FAV=" "
-I_SOURCE="󰒓 "
+I_SOURCE="󰳏 "
+I_PLAYER=" "
+I_SETTINGS="󰒓 "
 I_DIR=" "
 I_EXIT="󰈆 "
 
@@ -56,6 +61,42 @@ goi_api() {
     local base_url=$(get_base_url)
     local res=$(curl -s --connect-timeout 10 --max-time 30 "${base_url}${endpoint}" 2>/dev/null)
     echo "$res" | jq -e . >/dev/null 2>&1 && ! echo "$res" | grep -q '"error"' && echo "$res"
+}
+
+kiem_tra_player() {
+    local has_mpv=$(command -v mpv &>/dev/null && echo 1 || echo 0)
+    local has_vlc=$(command -v vlc &>/dev/null && echo 1 || echo 0)
+    
+    if [[ -n "$PLAYER_DEFAULT" ]]; then
+        if [[ "$PLAYER_DEFAULT" == "mpv" && $has_mpv -eq 1 ]] || \
+           [[ "$PLAYER_DEFAULT" == "vlc" && $has_vlc -eq 1 ]]; then
+            return 0
+        fi
+    fi
+    
+    if [[ $has_mpv -eq 1 ]]; then
+        PLAYER_DEFAULT="mpv"
+    elif [[ $has_vlc -eq 1 ]]; then
+        PLAYER_DEFAULT="vlc"
+    else
+        echo -e "${C_Y}⚠ Không tìm thấy MPV hoặc VLC!${C_R}"
+        echo -e "${C_C}Vui lòng cài đặt: sudo pacman -S mpv${C_R}"
+        exit 1
+    fi
+}
+
+play_video() {
+    local url="$1"
+    local title="$2"
+    
+    case "$PLAYER_DEFAULT" in
+        vlc)
+            vlc "$url" --meta-title="$title" --no-video-title-show >/dev/null 2>&1 &
+            ;;
+        *)
+            mpv "$url" --title="$title" --force-window >/dev/null 2>&1 &
+            ;;
+    esac
 }
 
 dang_tai() { echo -e "${C_C}⏳ Đang tải...${C_R}"; }
@@ -158,7 +199,7 @@ xem_tap() {
             enter)
                 sed -i "/$slug/d" "$HIST"
                 echo "$(date +%s)|$tieu_de|$slug|$url" >> "$HIST"
-                mpv "$url" --title="$tieu_de" --force-window >/dev/null 2>&1 &
+                play_video "$url" "$tieu_de"
                 ;;
             tab)
                 local file=$(echo "$tieu_de" | sed 's/ /_/g; s/[^a-zA-Z0-9_.-]//g').mp4
@@ -497,7 +538,7 @@ lich_su() {
     local chon=$(sort -rn "$HIST" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=2 --prompt="LỊCH SỬ > ")
     [[ -z "$chon" ]] && return
     
-    mpv "$(echo "$chon" | cut -d'|' -f4)" --title="$(echo "$chon" | cut -d'|' -f2)" --force-window >/dev/null 2>&1 &
+    play_video "$(echo "$chon" | cut -d'|' -f4)" "$(echo "$chon" | cut -d'|' -f2)"
 }
 
 yeu_thich() {
@@ -542,22 +583,65 @@ chon_nguon() {
     echo "$API_SOURCE" > "$SOURCE_FILE"
 }
 
+chon_player() {
+    local mpv_mark="" vlc_mark=""
+    local has_mpv=$(command -v mpv &>/dev/null && echo 1 || echo 0)
+    local has_vlc=$(command -v vlc &>/dev/null && echo 1 || echo 0)
+    
+    [[ "$PLAYER_DEFAULT" == "mpv" ]] && mpv_mark=" (đang dùng)"
+    [[ "$PLAYER_DEFAULT" == "vlc" ]] && vlc_mark=" (đang dùng)"
+    
+    local menu=""
+    [[ $has_mpv -eq 1 ]] && menu+="  MPV${mpv_mark} (Khuyên dùng)|mpv\n"
+    [[ $has_vlc -eq 1 ]] && menu+="  VLC${vlc_mark}|vlc"
+    
+    [[ -z "$menu" ]] && { thong_bao_loi "Không có trình phát"; return; }
+    
+    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 --prompt="TRÌNH PHÁT > " --height=40% \
+        --header="Chọn trình phát mặc định")
+    [[ -z "$chon" ]] && return
+    
+    PLAYER_DEFAULT=$(echo "$chon" | cut -d'|' -f2)
+    echo "PLAYER_DEFAULT=\"$PLAYER_DEFAULT\"" > "$CONFIG_FILE"
+}
+
+cai_dat() {
+    local menu="${I_PLAYER}Chọn Trình Phát|player
+${I_SOURCE}Đổi Nguồn|nguon
+${I_DIR}Mở Thư Mục|folder"
+    
+    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=40%)
+    [[ -z "$chon" ]] && return
+    
+    case "$(echo "$chon" | cut -d'|' -f2)" in
+        player) chon_player ;;
+        nguon)  chon_nguon ;;
+        folder) thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
+    esac
+}
+
 hien_banner() {
     clear
-    local nguon_text
+    local nguon_text player_text
     case "$API_SOURCE" in
         nguonc)  nguon_text="Nguonc" ;;
         phimapi) nguon_text="PhimAPI" ;;
         *)       nguon_text="Ophim1" ;;
     esac
+    case "$PLAYER_DEFAULT" in
+        vlc) player_text="VLC" ;;
+        *)   player_text="MPV" ;;
+    esac
     
     echo ""
     echo -e "${C_G}             ⢀⣀⣀⣀⣀⣀⣀⣀⣀⣀${C_R}"
     echo -e "${C_G} ⢀⣀⣠⣤⣴⣶⡶⢿⣿⣿⣿⠿⠿⠿⠿⠟⠛⢋⣁⣤⡴⠂⣠⡆${C_R}"
-    echo -e "${C_G} ⠈⠙⠻⢿⣿⣿⣿⣶⣤⣤⣤⣤⣤⣴⣶⣶⣿⣿⣿⡿⠋⣠⣾⣿${C_R}    ${C_Y}Sudachi Player${C_R}"
-    echo -e "${C_G} ⢀⣴⣤⣄⡉⠛⠻⠿⠿⣿⣿⣿⣿⡿⠿⠟⠋⣁⣤⣾⣿⣿⣿${C_R}     ${C_C}Git: KabosuNeko${C_R}"
-    echo -e "${C_G} ⣠⣾⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣶⣾⣿⣿⣿⣿⣿⣿⣿⡇${C_R}    ${C_M}Nguồn: ${nguon_text}${C_R}"
-    echo -e "${C_G} ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇${C_R}"
+    echo -e "${C_G} ⠈⠙⠻⢿⣿⣿⣿⣶⣤⣤⣤⣤⣤⣴⣶⣶⣿⣿⣿⡿⠋⣠⣾⣿${C_R}     ${C_Y}Sudachi Player${C_R}"
+    echo -e "${C_G} ⢀⣴⣤⣄⡉⠛⠻⠿⠿⣿⣿⣿⣿⡿⠿⠟⠋⣁⣤⣾⣿⣿⣿${C_R}      ${C_C}Git: KabosuNeko${C_R}"
+    echo -e "${C_G} ⣠⣾⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣶⣾⣿⣿⣿⣿⣿⣿⣿⡇${C_R}     ${C_M}Nguồn: ${nguon_text}${C_R}"
+    echo -e "${C_G} ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇${C_R}    ${C_C}Player: ${player_text}${C_R}"
     echo -e "${C_G} ⢰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠁${C_R}"
     echo -e "${C_G}  ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠇⢸⡟⢸⡟${C_R}"
     echo -e "${C_G} ⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢿⣷⡿⢿⡿⠁${C_R}"
@@ -570,9 +654,11 @@ hien_banner() {
 }
 
 menu_chinh() {
-    echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SOURCE}Đổi Nguồn\n${I_DIR}Mở Thư Mục\n${I_EXIT}Thoát" | \
+    echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SETTINGS}Cài Đặt\n${I_EXIT}Thoát" | \
         fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
+
+kiem_tra_player
 
 while true; do
     hien_banner
@@ -583,8 +669,7 @@ while true; do
         *"Lọc Nâng Cao"*) loc_nang_cao ;;
         *"Lịch Sử"*)    lich_su ;;
         *"Yêu Thích"*)  yeu_thich ;;
-        *"Đổi Nguồn"*)  chon_nguon ;;
-        *"Mở Thư Mục"*) thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
+        *"Cài Đặt"*)    cai_dat ;;
         *"Thoát"*)      exit 0 ;;
     esac
 done
