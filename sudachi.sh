@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Sudachi Player
+# SPDX-License-Identifier: MIT
+# 
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
