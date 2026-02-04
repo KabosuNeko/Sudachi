@@ -103,7 +103,7 @@ play_video() {
     esac
 }
 
-dang_tai() { echo -e "${C_C}⏳ Đang tải...${C_R}"; }
+dang_tai() { echo -e "${C_C} Đang tải...${C_R}"; }
 thong_bao_loi() { echo -e "${C_Y}  $1${C_R}"; sleep 2; }
 
 xu_ly_phimapi_v3() {
@@ -186,7 +186,7 @@ xem_tap() {
     
     while true; do
         local chon=$(echo "$ds_tap" | fzf "${FZF_OPTS[@]}" \
-            --header="📺 $ten" --prompt="CHỌN TẬP > " \
+            --header="󰟴 $ten" --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f)
