@@ -233,6 +233,58 @@ hien_thi_danh_sach() {
     [[ -n "$chon" ]] && xem_tap "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
 }
 
+hien_thi_danh_sach_phan_trang() {
+    local prompt="$1"
+    local fetch_callback="$2"
+    local page=1
+    local preview=$(tao_script_xem_truoc)
+    
+    while true; do
+        local items=$($fetch_callback "$page")
+        
+        if [[ -z "$items" ]]; then
+            if [[ $page -gt 1 ]]; then
+                ((page--))
+                continue
+            fi
+            thong_bao_loi "Không có kết quả"
+            rm -f "$preview"
+            return
+        fi
+        
+        local output=$(echo "$items" | fzf "${FZF_OPTS[@]}" \
+            --delimiter='|' --with-nth=1,2 \
+            --preview="$preview {}" --preview-window=right:45%:wrap \
+            --header="$prompt - Trang $page  |  ← → Chuyển trang" \
+            --prompt="$prompt > " \
+            --expect=right,left,enter)
+        
+        local key=$(echo "$output" | head -1)
+        local chon=$(echo "$output" | tail -n +2)
+        
+        case "$key" in
+            right)
+                ((page++))
+                continue
+                ;;
+            left)
+                [[ $page -gt 1 ]] && ((page--))
+                continue
+                ;;
+            enter|"")
+                if [[ -n "$chon" ]]; then
+                    rm -f "$preview"
+                    xem_tap "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+                    return
+                else
+                    rm -f "$preview"
+                    return
+                fi
+                ;;
+        esac
+    done
+}
+
 tao_script_tim_kiem() {
     local script="$CACHE/search_$$.sh"
     cat > "$script" << EOF
@@ -301,7 +353,7 @@ phim_moi() {
             items=$(xu_ly_ophim1 "$res" "$cdn")
             ;;
     esac
-    
+    3
     hien_thi_danh_sach "$items" "PHIM MỚI"
 }
 
@@ -338,31 +390,31 @@ duyet_phim() {
     
     local loai=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1 | sed 's/󰎁  //')
-    dang_tai
     
-    local res items cdn
+    fetch_duyet_phim() {
+        local p="$1" res cdn
+        case "$API_SOURCE" in
+            nguonc)
+                res=$(goi_api "/api/films/danh-sach/${loai}?page=${p}")
+                [[ -z "$res" ]] && return
+                xu_ly_nguonc "$res"
+                ;;
+            phimapi)
+                res=$(goi_api "/v1/api/danh-sach/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_phimapi_v1 "$res" "$cdn"
+                ;;
+            *)
+                res=$(goi_api "/v1/api/danh-sach/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_ophim1 "$res" "$cdn"
+                ;;
+        esac
+    }
     
-    case "$API_SOURCE" in
-        nguonc)
-            res=$(goi_api "/api/films/danh-sach/${loai}?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
-            items=$(xu_ly_nguonc "$res")
-            ;;
-        phimapi)
-            res=$(goi_api "/v1/api/danh-sach/${loai}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_phimapi_v1 "$res" "$cdn")
-            ;;
-        *)
-            res=$(goi_api "/v1/api/danh-sach/${loai}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_ophim1 "$res" "$cdn")
-            ;;
-    esac
-    
-    hien_thi_danh_sach "$items" "$ten"
+    hien_thi_danh_sach_phan_trang "$ten" fetch_duyet_phim
 }
 
 loc_theo_the_loai() {
@@ -399,31 +451,31 @@ Võ Thuật|vo-thuat"
     
     local slug=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1)
-    dang_tai
     
-    local items cdn
+    fetch_the_loai() {
+        local p="$1" res cdn
+        case "$API_SOURCE" in
+            nguonc)
+                res=$(goi_api "/api/films/the-loai/${slug}?page=${p}")
+                [[ -z "$res" ]] && return
+                xu_ly_nguonc "$res"
+                ;;
+            phimapi)
+                res=$(goi_api "/v1/api/the-loai/${slug}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_phimapi_v1 "$res" "$cdn"
+                ;;
+            *)
+                res=$(goi_api "/v1/api/the-loai/${slug}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_ophim1 "$res" "$cdn"
+                ;;
+        esac
+    }
     
-    case "$API_SOURCE" in
-        nguonc)
-            res=$(goi_api "/api/films/the-loai/${slug}?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            items=$(xu_ly_nguonc "$res")
-            ;;
-        phimapi)
-            res=$(goi_api "/v1/api/the-loai/${slug}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_phimapi_v1 "$res" "$cdn")
-            ;;
-        *)
-            res=$(goi_api "/v1/api/the-loai/${slug}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_ophim1 "$res" "$cdn")
-            ;;
-    esac
-    
-    hien_thi_danh_sach "$items" "$ten"
+    hien_thi_danh_sach_phan_trang "$ten" fetch_the_loai
 }
 
 loc_theo_quoc_gia() {
@@ -460,31 +512,31 @@ Philippines|philippines"
     
     local slug=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1)
-    dang_tai
     
-    local items cdn
+    fetch_quoc_gia() {
+        local p="$1" res cdn
+        case "$API_SOURCE" in
+            nguonc)
+                res=$(goi_api "/api/films/quoc-gia/${slug}?page=${p}")
+                [[ -z "$res" ]] && return
+                xu_ly_nguonc "$res"
+                ;;
+            phimapi)
+                res=$(goi_api "/v1/api/quoc-gia/${slug}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_phimapi_v1 "$res" "$cdn"
+                ;;
+            *)
+                res=$(goi_api "/v1/api/quoc-gia/${slug}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_ophim1 "$res" "$cdn"
+                ;;
+        esac
+    }
     
-    case "$API_SOURCE" in
-        nguonc)
-            res=$(goi_api "/api/films/quoc-gia/${slug}?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            items=$(xu_ly_nguonc "$res")
-            ;;
-        phimapi)
-            res=$(goi_api "/v1/api/quoc-gia/${slug}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_phimapi_v1 "$res" "$cdn")
-            ;;
-        *)
-            res=$(goi_api "/v1/api/quoc-gia/${slug}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_ophim1 "$res" "$cdn")
-            ;;
-    esac
-    
-    hien_thi_danh_sach "$items" "$ten"
+    hien_thi_danh_sach_phan_trang "$ten" fetch_quoc_gia
 }
 
 loc_theo_nam() {
@@ -495,30 +547,32 @@ loc_theo_nam() {
     local chon=$(echo -e "$ds" | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
     [[ -z "$chon" ]] && return
     
-    dang_tai
-    local res items cdn
+    local nam_chon="$chon"
     
-    case "$API_SOURCE" in
-        nguonc)
-            res=$(goi_api "/api/films/nam-phat-hanh/${chon}?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            items=$(xu_ly_nguonc "$res")
-            ;;
-        phimapi)
-            res=$(goi_api "/v1/api/nam/${chon}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_phimapi_v1 "$res" "$cdn")
-            ;;
-        *)
-            res=$(goi_api "/v1/api/nam-phat-hanh/${chon}?page=1&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
-            cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_ophim1 "$res" "$cdn")
-            ;;
-    esac
+    fetch_nam() {
+        local p="$1" res cdn
+        case "$API_SOURCE" in
+            nguonc)
+                res=$(goi_api "/api/films/nam-phat-hanh/${nam_chon}?page=${p}")
+                [[ -z "$res" ]] && return
+                xu_ly_nguonc "$res"
+                ;;
+            phimapi)
+                res=$(goi_api "/v1/api/nam/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_phimapi_v1 "$res" "$cdn"
+                ;;
+            *)
+                res=$(goi_api "/v1/api/nam-phat-hanh/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_ophim1 "$res" "$cdn"
+                ;;
+        esac
+    }
     
-    hien_thi_danh_sach "$items" "Năm $chon"
+    hien_thi_danh_sach_phan_trang "Năm $chon" fetch_nam
 }
 
 loc_nang_cao() {
