@@ -36,6 +36,7 @@ I_PLAYER=" "
 I_SETTINGS="󰒓 "
 I_DIR=" "
 I_EXIT="󰈆 "
+I_ANIME=" "
 
 C_G='\033[1;32m'
 C_Y='\033[1;33m'
@@ -575,6 +576,33 @@ loc_theo_nam() {
     hien_thi_danh_sach_phan_trang "Năm $chon" fetch_nam
 }
 
+che_do_anime() {
+    fetch_anime() {
+        local p="$1" res cdn
+        case "$API_SOURCE" in
+            nguonc)
+                res=$(goi_api "/api/films/quoc-gia/nhat-ban?page=${p}")
+                [[ -z "$res" ]] && return
+                xu_ly_nguonc "$res"
+                ;;
+            phimapi)
+                res=$(goi_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_phimapi_v1 "$res" "$cdn"
+                ;;
+            *)
+                res=$(goi_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
+                [[ -z "$res" ]] && return
+                cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+                xu_ly_ophim1 "$res" "$cdn"
+                ;;
+        esac
+    }
+
+    hien_thi_danh_sach_phan_trang "Anime" fetch_anime
+}
+
 loc_nang_cao() {
     local menu="  Thể Loại|theloai
   Quốc Gia|quocgia
@@ -712,7 +740,7 @@ hien_banner() {
 }
 
 menu_chinh() {
-    echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SETTINGS}Cài Đặt\n${I_EXIT}Thoát" | \
+    echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_ANIME}Anime\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SETTINGS}Cài Đặt\n${I_EXIT}Thoát" | \
         fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
 
@@ -724,6 +752,7 @@ while true; do
         *"Tìm Kiếm"*)   tim_kiem ;;
         *"Phim Mới"*)   phim_moi ;;
         *"Duyệt Phim"*) duyet_phim ;;
+        *"Anime"*)      che_do_anime ;;
         *"Lọc Nâng Cao"*) loc_nang_cao ;;
         *"Lịch Sử"*)    lich_su ;;
         *"Yêu Thích"*)  yeu_thich ;;
