@@ -108,6 +108,29 @@ Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config
 
 ---
 
+## Block ADS (nâng cao)
+Mặc dù MPV/VLC đã loại bỏ hoàn toàn quảng cáo Popup/Banner, nhưng tất nhiên các chủ api họ tính cả rồi :)) vẫn sẽ có những qc chèn thẳng vào video và khi tua nó sẽ ngay lập tức chạy lại từ đầu khiến ta cực kì khó chịu. Để tránh việc này thì chúng ta sẽ setup một dns ở cấp hệ thống, khuyên dùng nextdns vì nó free thừa cho nhu cầu dùng cơ bản và tốc độ rất ổn.
+- Trước tiên hãy truy cập vào [nextdns](https://my.nextdns.io/) và tạo một tài khoản cho riêng bạn sau đó:
+
+### 1. Privacy
+- Vào tab Privacy > Add a Blocklist, thêm 3 list này:
+
+    ✅ hostsVN (Chặn quảng cáo đặc thù Việt Nam)
+
+    ✅ ABPVN List (Bộ lọc quảng cáo Việt Nam nổi tiếng)
+
+    ✅ HaGeZi - Multi PRO (Bộ lọc quốc tế cực mạnh chặn Tracker)
+
+### 2. Security
+- Vào tab Security, bật tất cả tính năng (ngoại trừ Block Dynamic DNS Hostnames):
+
+    🚀 Quan trọng nhất: Block Newly Registered Domains (NRDs): Chặn các trang nhà cái/cờ bạc vừa mới lập trong 30 ngày gần đây để chạy quảng cáo. 
+
+### 3. Setup
+- Tại ngay tab setup của [nextdns](https://my.nextdns.io/) hãy đọc setup guide nó đã ghi rõ và chi tiết, khuyên dùng nextdns-cli (NextDNS Command-Line Client) vì dễ quản lí và bật/tắt dns khi cần thiết. 
+
+---
+
 ## 🙏 Credits
 
 - **[PhimAPI](https://phimapi.com), [OPhim](https://ophim.cc), [NguonC](https://nguonc.com)** - Cung cấp API phim.
