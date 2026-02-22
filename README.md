@@ -38,9 +38,9 @@ Chọn bản phân phối (distro) của bạn bên dưới để cài đặt c�
 ```bash
 sudo pacman -S fzf jq curl yt-dlp chafa aria2 libnotify
 # Mpv
-sudo pamcan -S mpv
+sudo pacman -S mpv
 # Vlc
-sudo pamcan -S vlc
+sudo pacman -S vlc
 ```
 
 #### 🍥 Debian / Ubuntu / Kali Linux / Linux Mint
