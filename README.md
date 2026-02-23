@@ -129,6 +129,7 @@ Mặc dù MPV/VLC đã loại bỏ hoàn toàn quảng cáo Popup/Banner, nhưng
 ### 3. Setup
 - Tại ngay tab setup của [nextdns](https://my.nextdns.io/) hãy đọc setup guide nó đã ghi rõ và chi tiết, khuyên dùng nextdns-cli (NextDNS Command-Line Client) vì dễ quản lí và bật/tắt dns khi cần thiết. 
 
+LƯU Ý: sẽ không thể fix được hoàn toàn do bên api họ đã đặt một scirpt nhúng vào phim lúc đang xem luôn rồi nên là cái này chịu chết :))
 ---
 
 ## 🙏 Credits
