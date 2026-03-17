@@ -41,6 +41,7 @@ I_DIR=" "
 I_EXIT="󰈆 "
 I_ANIME=" "
 I_QUA="󱤵 "
+I_CACHE="󰃢 "
 
 C_G='\033[1;32m'
 C_Y='\033[1;33m'
@@ -49,16 +50,29 @@ C_M='\033[1;35m'
 C_R='\033[0m'
 
 FZF_OPTS=(
-    "--border=rounded" "--margin=5%,10%" "--padding=1"
-    "--layout=reverse" "--pointer=" "--marker= "
-    "--color=bg:-1,bg+:-1"
-    "--color=fg:#d8dee9,fg+:#a3be8c,hl:#ebcb8b,hl+:#ebcb8b"
-    "--color=border:#a3be8c,prompt:#81a1c1,pointer:#ebcb8b"
-    "--color=info:#e5e9f0,header:#81a1c1"
+    "--border=bold"
+    "--margin=2%,8%,3%,8%"
+    "--padding=1,2"
+    "--layout=reverse-list"
+    "--info=inline"
+    "--preview-window=right:45%:border-bold"
+
+    "--pointer=█"
+    "--marker=✓"
+    "--ellipsis=…"
+
+    "--color=bg:-1,bg+:-1,gutter:-1"
+    "--color=fg:7,fg+:14"
+    "--color=hl:1,hl+:3"
+    "--color=border:8,label:14"
+    "--color=prompt:4,pointer:14,marker:2"
+    "--color=spinner:10,info:8,header:5"
+    "--color=preview-fg:7,preview-border:8,preview-scrollbar:8"
+    "--color=query:7"
 )
 
 
-kiem_tra_phu_thuoc() {
+check_dependencies() {
     local missing=()
     command -v fzf &>/dev/null  || missing+=("fzf")
     command -v jq &>/dev/null   || missing+=("jq")
@@ -80,7 +94,7 @@ cleanup() {
 trap cleanup EXIT SIGINT SIGTERM
 
 
-ghi_debug() {
+log_debug() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$CACHE/debug.log"
 }
 
@@ -93,7 +107,7 @@ get_base_url() {
 }
 
 
-goi_api() {
+call_api() {
     local endpoint="$1"
     local base_url=$(get_base_url)
     local url="${base_url}${endpoint}"
@@ -116,20 +130,20 @@ goi_api() {
     local res attempt
     for attempt in 1 2 3; do
         res=$(curl -s --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
-        if echo "$res" | jq -e . >/dev/null 2>&1 && ! echo "$res" | grep -q '"error"'; then
+        if echo "$res" | jq -e . >/dev/null 2>&1 && ! echo "$res" | jq -e '.status == "error" or has("error")' >/dev/null 2>&1; then
             echo "$res" > "$cache_file"
             echo "$res"
             return
         fi
-        ghi_debug "goi_api attempt $attempt failed for $url"
+        log_debug "call_api attempt $attempt failed for $url"
         [[ $attempt -lt 3 ]] && sleep 1
     done
 
-    ghi_debug "goi_api all 3 attempts failed for $url — response: $(echo "$res" | head -c 200)"
+    log_debug "call_api all 3 attempts failed for $url — response: $(echo "$res" | head -c 200)"
     return 1
 }
 
-kiem_tra_player() {
+check_player() {
     local has_mpv=$(command -v mpv &>/dev/null && echo 1 || echo 0)
     local has_vlc=$(command -v vlc &>/dev/null && echo 1 || echo 0)
     
@@ -172,47 +186,46 @@ play_video() {
     esac
 }
 
-dang_tai() { echo -e "${C_C} Đang tải...${C_R}"; }
-thong_bao_loi() { echo -e "${C_Y}  $1${C_R}"; sleep 2; }
+show_loading() { echo -e "${C_C} Đang tải...${C_R}"; }
+show_error() { echo -e "${C_Y}  $1${C_R}"; sleep 2; }
 
 
-xu_ly_phimapi_v3() {
+parse_phimapi_v3() {
     echo "$1" | jq -r '.items[] | 
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(.poster_url)"' 2>/dev/null
 }
 
-xu_ly_phimapi_v1() {
+parse_phimapi_v1() {
     echo "$1" | jq -r --arg cdn "$2" '.data.items[] | 
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' 2>/dev/null
 }
 
-xu_ly_nguonc() {
+parse_nguonc() {
     echo "$1" | jq -r '.items[] | 
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.current_episode // "N/A")|\(.slug)|\(.thumb_url)"' 2>/dev/null
 }
 
-xu_ly_ophim1() {
+parse_ophim1() {
     echo "$1" | jq -r --arg cdn "$2" '.data.items[] | 
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' 2>/dev/null
 }
 
 
-tao_script_xem_truoc() {
+create_preview_script() {
     local script="$CACHE/preview_$$.sh"
     cat > "$script" << EOF
 #!/bin/bash
 IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
 source="$API_SOURCE"
 
-echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-echo -e "\033[1;33m  \${ten}\033[0m"
-echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+echo -e "\033[1;36m  \${ten}\033[0m"
+echo -e "\033[1;30m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
 echo ""
-[[ -n "\$nam" && "\$nam" != "null" ]] && echo -e "  \033[0;36m󰃰 Năm:\033[0m \$nam"
+[[ -n "\$nam" && "\$nam" != "null" ]] && echo -e "  \033[0;35m󰃰 Năm:\033[0m \$nam"
 [[ -n "\$quocgia" && "\$quocgia" != "null" ]] && echo -e "  \033[0;36m󰇧 Quốc gia:\033[0m \$quocgia"
 [[ -n "\$trangthai" && "\$trangthai" != "null" ]] && echo -e "  \033[0;36m󱖫 Trạng thái:\033[0m \$trangthai"
 echo ""
@@ -241,16 +254,16 @@ EOF
 }
 
 
-xem_tap() {
+watch_episode() {
     local slug="$1" ten="$2"
-    dang_tai
+    show_loading
     
     local res ds_tap server_name
 
     case "$API_SOURCE" in
         nguonc)
-            res=$(goi_api "/api/film/$slug")
-            [[ -z "$res" ]] && { thong_bao_loi "Không lấy được thông tin"; return; }
+            res=$(call_api "/api/film/$slug")
+            [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
 
             local server_count=$(echo "$res" | jq '.movie.episodes | length' 2>/dev/null)
@@ -265,10 +278,11 @@ xem_tap() {
 
             ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.movie.episodes[$idx].items[] | "\(.name)|\(.embed)"' 2>/dev/null)
             [[ -z "$ds_tap" ]] && ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.movie.episodes[$idx].items[] | "\(.name)|\(.m3u8)"' 2>/dev/null)
+            ds_tap=$(echo "$ds_tap" | awk -F'|' '$2 != "" && $2 != "null"')
             ;;
         phimapi)
-            res=$(goi_api "/phim/$slug")
-            [[ -z "$res" ]] && { thong_bao_loi "Không lấy được thông tin"; return; }
+            res=$(call_api "/phim/$slug")
+            [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
             local server_count=$(echo "$res" | jq '.episodes | length' 2>/dev/null)
             local server_idx=0
@@ -283,8 +297,8 @@ xem_tap() {
             ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' 2>/dev/null)
             ;;
         *)
-            res=$(goi_api "/v1/api/phim/$slug")
-            [[ -z "$res" ]] && { thong_bao_loi "Không lấy được thông tin"; return; }
+            res=$(call_api "/v1/api/phim/$slug")
+            [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
             local server_count=$(echo "$res" | jq '.data.item.episodes | length' 2>/dev/null)
             local server_idx=0
@@ -300,7 +314,7 @@ xem_tap() {
             ;;
     esac
     
-    [[ -z "$ds_tap" ]] && { thong_bao_loi "Không có tập phim"; return; }
+    [[ -z "$ds_tap" ]] && { show_error "Không có tập phim"; return; }
 
 
     local last_ep=""
@@ -350,11 +364,11 @@ xem_tap() {
     done
 }
 
-hien_thi_danh_sach() {
+show_list() {
     local items="$1" prompt="$2"
-    [[ -z "$items" ]] && { thong_bao_loi "Không có kết quả"; return; }
+    [[ -z "$items" ]] && { show_error "Không có kết quả"; return; }
     
-    local preview=$(tao_script_xem_truoc)
+    local preview=$(create_preview_script)
     
     local chon=$(echo "$items" | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1,2 \
@@ -366,15 +380,15 @@ hien_thi_danh_sach() {
     if [[ -n "$chon" ]]; then
         _fav_nam=$(echo "$chon" | cut -d'|' -f2)
         _fav_anh=$(echo "$chon" | cut -d'|' -f6)
-        xem_tap "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+        watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
     fi
 }
 
-hien_thi_danh_sach_phan_trang() {
+show_paginated_list() {
     local prompt="$1"
     local fetch_callback="$2"
     local page=1
-    local preview=$(tao_script_xem_truoc)
+    local preview=$(create_preview_script)
     
     while true; do
         local items=$($fetch_callback "$page")
@@ -384,7 +398,7 @@ hien_thi_danh_sach_phan_trang() {
                 ((page--))
                 continue
             fi
-            thong_bao_loi "Không có kết quả"
+            show_error "Không có kết quả"
             rm -f "$preview"
             return
         fi
@@ -413,7 +427,7 @@ hien_thi_danh_sach_phan_trang() {
                     rm -f "$preview"
                     _fav_nam=$(echo "$chon" | cut -d'|' -f2)
                     _fav_anh=$(echo "$chon" | cut -d'|' -f6)
-                    xem_tap "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+                    watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
                     return
                 else
                     rm -f "$preview"
@@ -425,30 +439,30 @@ hien_thi_danh_sach_phan_trang() {
 }
 
 
-fetch_chung() {
+fetch_list() {
     local loai="$1" p="$2" res cdn
     case "$API_SOURCE" in
         nguonc)
-            res=$(goi_api "/api/films/${loai}?page=${p}")
+            res=$(call_api "/api/films/${loai}?page=${p}")
             [[ -z "$res" ]] && return
-            xu_ly_nguonc "$res"
+            parse_nguonc "$res"
             ;;
         phimapi)
-            res=$(goi_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+            res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
             [[ -z "$res" ]] && return
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            xu_ly_phimapi_v1 "$res" "$cdn"
+            parse_phimapi_v1 "$res" "$cdn"
             ;;
         *)
-            res=$(goi_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+            res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
             [[ -z "$res" ]] && return
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            xu_ly_ophim1 "$res" "$cdn"
+            parse_ophim1 "$res" "$cdn"
             ;;
     esac
 }
 
-tao_script_tim_kiem() {
+create_search_script() {
     local script="$CACHE/search_$$.sh"
     cat > "$script" << EOF
 #!/bin/bash
@@ -480,9 +494,9 @@ EOF
     echo "$script"
 }
 
-tim_kiem() {
-    local search=$(tao_script_tim_kiem)
-    local preview=$(tao_script_xem_truoc)
+search() {
+    local search=$(create_search_script)
+    local preview=$(create_preview_script)
     
     local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
         --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
@@ -491,36 +505,39 @@ tim_kiem() {
         --preview="$preview {}" --preview-window=right:45%:wrap)
     
     rm -f "$search" "$preview"
-    [[ -n "$chon" ]] && xem_tap "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+    [[ -n "$chon" ]] && watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
 }
 
-phim_moi() {
-    dang_tai
-    local res items cdn
-    
+new_releases() {
     case "$API_SOURCE" in
         nguonc)
-            res=$(goi_api "/api/films/phim-moi-cap-nhat?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
-            items=$(xu_ly_nguonc "$res")
+            fetch_new_nguonc() {
+                local res
+                res=$(call_api "/api/films/phim-moi-cap-nhat?page=$1")
+                [[ -z "$res" ]] && return
+                parse_nguonc "$res"
+            }
+            show_paginated_list "PHIM MỚI" fetch_new_nguonc
             ;;
         phimapi)
-            res=$(goi_api "/danh-sach/phim-moi-cap-nhat-v3?page=1")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
-            items=$(xu_ly_phimapi_v3 "$res")
+            show_loading
+            local res
+            res=$(call_api "/danh-sach/phim-moi-cap-nhat-v3?page=1")
+            [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
+            show_list "$(parse_phimapi_v3 "$res")" "PHIM MỚI"
             ;;
         *)
-            res=$(goi_api "/v1/api/home")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi kết nối"; return; }
+            show_loading
+            local res cdn
+            res=$(call_api "/v1/api/home")
+            [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            items=$(xu_ly_ophim1 "$res" "$cdn")
+            show_list "$(parse_ophim1 "$res" "$cdn")" "PHIM MỚI"
             ;;
     esac
-    
-    hien_thi_danh_sach "$items" "PHIM MỚI"
 }
 
-duyet_phim() {
+browse() {
     local menu
     
     case "$API_SOURCE" in
@@ -554,16 +571,16 @@ duyet_phim() {
     local loai=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1 | sed 's/󰎁  //')
     
-    fetch_duyet_phim() {
-        fetch_chung "danh-sach/${loai}" "$1"
+    fetch_browse() {
+        fetch_list "danh-sach/${loai}" "$1"
     }
     
-    hien_thi_danh_sach_phan_trang "$ten" fetch_duyet_phim
+    show_paginated_list "$ten" fetch_browse
 }
 
 
-loc_theo_the_loai() {
-    dang_tai
+filter_by_genre() {
+    show_loading
     local res ds
     
     case "$API_SOURCE" in
@@ -582,17 +599,17 @@ Phiêu Lưu|phieu-luu
 Tâm Lý|tam-ly
 Cổ Trang|co-trang
 Võ Thuật|vo-thuat"
-                ghi_debug "loc_theo_the_loai: nguonc API fallback to hardcoded"
+                log_debug "filter_by_genre: nguonc API fallback to hardcoded"
             fi
             ;;
         phimapi)
-            res=$(goi_api "/the-loai")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
+            res=$(call_api "/the-loai")
+            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
             ds=$(echo "$res" | jq -r '.[] | "\(.name)|\(.slug)"' 2>/dev/null)
             ;;
         *)
-            res=$(goi_api "/v1/api/the-loai")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
+            res=$(call_api "/v1/api/the-loai")
+            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
             ds=$(echo "$res" | jq -r '.data.items[] | "\(.name)|\(.slug)"' 2>/dev/null)
             ;;
     esac
@@ -603,15 +620,15 @@ Võ Thuật|vo-thuat"
     local slug=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1)
     
-    fetch_the_loai() {
-        fetch_chung "the-loai/${slug}" "$1"
+    fetch_genre() {
+        fetch_list "the-loai/${slug}" "$1"
     }
     
-    hien_thi_danh_sach_phan_trang "$ten" fetch_the_loai
+    show_paginated_list "$ten" fetch_genre
 }
 
-loc_theo_quoc_gia() {
-    dang_tai
+filter_by_country() {
+    show_loading
     local res ds
     
     case "$API_SOURCE" in
@@ -630,17 +647,17 @@ Việt Nam|viet-nam
 Đài Loan|dai-loan
 Hồng Kông|hong-kong
 Philippines|philippines"
-                ghi_debug "loc_theo_quoc_gia: nguonc API fallback to hardcoded"
+                log_debug "filter_by_country: nguonc API fallback to hardcoded"
             fi
             ;;
         phimapi)
-            res=$(goi_api "/quoc-gia")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
+            res=$(call_api "/quoc-gia")
+            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
             ds=$(echo "$res" | jq -r '.[] | "\(.name)|\(.slug)"' 2>/dev/null)
             ;;
         *)
-            res=$(goi_api "/v1/api/quoc-gia")
-            [[ -z "$res" ]] && { thong_bao_loi "Lỗi"; return; }
+            res=$(call_api "/v1/api/quoc-gia")
+            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
             ds=$(echo "$res" | jq -r '.data.items[] | "\(.name)|\(.slug)"' 2>/dev/null)
             ;;
     esac
@@ -651,14 +668,14 @@ Philippines|philippines"
     local slug=$(echo "$chon" | cut -d'|' -f2)
     local ten=$(echo "$chon" | cut -d'|' -f1)
     
-    fetch_quoc_gia() {
-        fetch_chung "quoc-gia/${slug}" "$1"
+    fetch_country() {
+        fetch_list "quoc-gia/${slug}" "$1"
     }
     
-    hien_thi_danh_sach_phan_trang "$ten" fetch_quoc_gia
+    show_paginated_list "$ten" fetch_country
 }
 
-loc_theo_nam() {
+filter_by_year() {
     local nam_hien_tai=$(date +%Y)
     local ds=""
     for ((y=nam_hien_tai; y>=2000; y--)); do ds+="$y\n"; done
@@ -669,57 +686,57 @@ loc_theo_nam() {
     local nam_chon="$chon"
     
 
-    fetch_nam() {
+    fetch_year() {
         local p="$1"
         case "$API_SOURCE" in
-            nguonc) fetch_chung "nam-phat-hanh/${nam_chon}" "$p" ;;
+            nguonc) fetch_list "nam-phat-hanh/${nam_chon}" "$p" ;;
             phimapi)
                 local res cdn
-                res=$(goi_api "/v1/api/nam/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                res=$(call_api "/v1/api/nam/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                xu_ly_phimapi_v1 "$res" "$cdn"
+                parse_phimapi_v1 "$res" "$cdn"
                 ;;
             *)
                 local res cdn
-                res=$(goi_api "/v1/api/nam-phat-hanh/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+                res=$(call_api "/v1/api/nam-phat-hanh/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                xu_ly_ophim1 "$res" "$cdn"
+                parse_ophim1 "$res" "$cdn"
                 ;;
         esac
     }
     
-    hien_thi_danh_sach_phan_trang "Năm $chon" fetch_nam
+    show_paginated_list "Năm $chon" fetch_year
 }
 
-che_do_anime() {
+anime_mode() {
 
     fetch_anime() {
         local p="$1"
         case "$API_SOURCE" in
-            nguonc) fetch_chung "quoc-gia/nhat-ban" "$p" ;;
+            nguonc) fetch_list "quoc-gia/nhat-ban" "$p" ;;
             phimapi)
                 local res cdn
-                res=$(goi_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
+                res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                xu_ly_phimapi_v1 "$res" "$cdn"
+                parse_phimapi_v1 "$res" "$cdn"
                 ;;
             *)
                 local res cdn
-                res=$(goi_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
+                res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                xu_ly_ophim1 "$res" "$cdn"
+                parse_ophim1 "$res" "$cdn"
                 ;;
         esac
     }
 
-    hien_thi_danh_sach_phan_trang "Anime" fetch_anime
+    show_paginated_list "Anime" fetch_anime
 }
 
-loc_nang_cao() {
+advanced_filter() {
     local menu="  Thể Loại|theloai
   Quốc Gia|quocgia
   Năm|nam"
@@ -728,14 +745,14 @@ loc_nang_cao() {
     [[ -z "$chon" ]] && return
     
     case "$(echo "$chon" | cut -d'|' -f2)" in
-        theloai) loc_theo_the_loai ;;
-        quocgia) loc_theo_quoc_gia ;;
-        nam)     loc_theo_nam ;;
+        theloai) filter_by_genre ;;
+        quocgia) filter_by_country ;;
+        nam)     filter_by_year ;;
     esac
 }
 
-lich_su() {
-    [[ ! -s "$HIST" ]] && { thong_bao_loi "Chưa có lịch sử"; return; }
+history() {
+    [[ ! -s "$HIST" ]] && { show_error "Chưa có lịch sử"; return; }
     
     local chon=$(sort -rn "$HIST" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=2 --prompt="LỊCH SỬ > ")
     [[ -z "$chon" ]] && return
@@ -744,8 +761,8 @@ lich_su() {
 }
 
 
-yeu_thich() {
-    [[ ! -s "$FAV" ]] && { thong_bao_loi "Chưa có yêu thích"; return; }
+favorites() {
+    [[ ! -s "$FAV" ]] && { show_error "Chưa có yêu thích"; return; }
     
     local chon=$(sort -u "$FAV" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
         --prompt="YÊU THÍCH > " --expect=enter,ctrl-d \
@@ -759,14 +776,19 @@ yeu_thich() {
     local ten=$(echo "$data" | cut -d'|' -f1)
     
     case "$phim" in
-        enter)  xem_tap "$slug" "$ten" ;;
+        enter)  watch_episode "$slug" "$ten" ;;
         ctrl-d)
             grep -v "|${slug}|" "$FAV" | grep -v "|${slug}$" > "$FAV.tmp" && mv "$FAV.tmp" "$FAV"
             ;;
     esac
 }
 
-chon_nguon() {
+check_source_status() {
+    local url="$1"
+    curl -s --max-time 2 --head "$url" &>/dev/null && echo "✓" || echo "✗"
+}
+
+select_source() {
     local phimapi_mark="" nguonc_mark="" ophim1_mark=""
     
     case "$API_SOURCE" in
@@ -774,10 +796,20 @@ chon_nguon() {
         nguonc)  nguonc_mark=" (đang dùng)" ;;
         *)       ophim1_mark=" (đang dùng)" ;;
     esac
+
+    echo -e "${C_C} Kiểm tra kết nối nguồn...${C_R}"
+    local st_ophim st_phimapi st_nguonc
+    st_ophim=$(check_source_status "$API_OPHIM1") &
+    st_phimapi=$(check_source_status "$API_PHIMAPI") &
+    st_nguonc=$(check_source_status "$API_NGUONC") &
+    wait
+    st_ophim=$(check_source_status "$API_OPHIM1")
+    st_phimapi=$(check_source_status "$API_PHIMAPI")
+    st_nguonc=$(check_source_status "$API_NGUONC")
     
-    local menu="󱃾  Ophim1${ophim1_mark}|ophim1
-󱃾  PhimAPI${phimapi_mark}|phimapi
-󱃾  Nguonc${nguonc_mark}|nguonc"
+    local menu="󱃾  Ophim1 ${st_ophim}${ophim1_mark}|ophim1
+󱃾  PhimAPI ${st_phimapi}${phimapi_mark}|phimapi
+󱃾  Nguonc ${st_nguonc}${nguonc_mark}|nguonc"
     
     local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="NGUỒN > " --height=40% \
@@ -786,17 +818,16 @@ chon_nguon() {
     
     local new_source=$(echo "$chon" | cut -d'|' -f2)
 
-
     if [[ "$new_source" != "$API_SOURCE" ]]; then
         rm -f "$CACHE"/*.json
-        ghi_debug "Cache cleared: source switched from $API_SOURCE to $new_source"
+        log_debug "Cache cleared: source switched from $API_SOURCE to $new_source"
     fi
 
     API_SOURCE="$new_source"
     echo "$API_SOURCE" > "$SOURCE_FILE"
 }
 
-chon_player() {
+select_player() {
     local mpv_mark="" vlc_mark=""
     local has_mpv=$(command -v mpv &>/dev/null && echo 1 || echo 0)
     local has_vlc=$(command -v vlc &>/dev/null && echo 1 || echo 0)
@@ -808,7 +839,7 @@ chon_player() {
     [[ $has_mpv -eq 1 ]] && menu+="  MPV${mpv_mark} (Khuyên dùng)|mpv\n"
     [[ $has_vlc -eq 1 ]] && menu+="  VLC${vlc_mark}|vlc"
     
-    [[ -z "$menu" ]] && { thong_bao_loi "Không có trình phát"; return; }
+    [[ -z "$menu" ]] && { show_error "Không có trình phát"; return; }
     
     local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="TRÌNH PHÁT > " --height=40% \
@@ -821,7 +852,7 @@ chon_player() {
 }
 
 
-chon_chat_luong() {
+select_quality() {
     local current_mark_1080="" current_mark_720="" current_mark_480="" current_mark_auto=""
     
     case "$QUALITY" in
@@ -848,25 +879,36 @@ chon_chat_luong() {
     [[ -n "$QUALITY" ]] && echo "QUALITY=\"$QUALITY\"" >> "$CONFIG_FILE"
 }
 
-cai_dat() {
+clear_cache() {
+    local count
+    count=$(find "$CACHE" -name '*.json' | wc -l)
+    rm -f "$CACHE"/*.json
+    log_debug "Cache cleared manually: $count files removed"
+    echo -e "${C_G}  Đã xóa ${count} file cache.${C_R}"
+    sleep 1
+}
+
+settings() {
     local menu="${I_PLAYER}Chọn Trình Phát|player
 ${I_SOURCE}Đổi Nguồn|nguon
 ${I_QUA}Chất Lượng|quality
-${I_DIR}Mở Thư Mục|folder"
+${I_DIR}Mở Thư Mục|folder
+${I_CACHE}Xóa Cache|cache"
     
     local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=40%)
     [[ -z "$chon" ]] && return
     
     case "$(echo "$chon" | cut -d'|' -f2)" in
-        player)  chon_player ;;
-        nguon)   chon_nguon ;;
-        quality) chon_chat_luong ;;
+        player)  select_player ;;
+        nguon)   select_source ;;
+        quality) select_quality ;;
         folder)  thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
+        cache)   clear_cache ;;
     esac
 }
 
-hien_banner() {
+show_banner() {
     clear
     local nguon_text player_text quality_text
     case "$API_SOURCE" in
@@ -903,26 +945,26 @@ hien_banner() {
     echo ""
 }
 
-menu_chinh() {
+main_menu() {
     echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_ANIME}Anime\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SETTINGS}Cài Đặt\n${I_EXIT}Thoát" | \
         fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
 
 
-kiem_tra_phu_thuoc
-kiem_tra_player
+check_dependencies
+check_player
 
 while true; do
-    hien_banner
-    case "$(menu_chinh)" in
-        *"Tìm Kiếm"*)   tim_kiem ;;
-        *"Phim Mới"*)   phim_moi ;;
-        *"Duyệt Phim"*) duyet_phim ;;
-        *"Anime"*)      che_do_anime ;;
-        *"Lọc Nâng Cao"*) loc_nang_cao ;;
-        *"Lịch Sử"*)    lich_su ;;
-        *"Yêu Thích"*)  yeu_thich ;;
-        *"Cài Đặt"*)    cai_dat ;;
+    show_banner
+    case "$(main_menu)" in
+        *"Tìm Kiếm"*)   search ;;
+        *"Phim Mới"*)   new_releases ;;
+        *"Duyệt Phim"*) browse ;;
+        *"Anime"*)      anime_mode ;;
+        *"Lọc Nâng Cao"*) advanced_filter ;;
+        *"Lịch Sử"*)    history ;;
+        *"Yêu Thích"*)  favorites ;;
+        *"Cài Đặt"*)    settings ;;
         *"Thoát"*)      exit 0 ;;
     esac
 done
