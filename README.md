@@ -10,7 +10,7 @@ Bộ công cụ này bao gồm:
 - Tối ưu hóa cấu hình **MPV** để xem phim & **yt-dlp** để tải xuống.
 
 ## Preview
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/06148801-8642-4597-b56f-c6c045d99b22" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/5ef55ffc-62cf-4b07-9383-65ad1619bc4c" />
 
 ---
 
