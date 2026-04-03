@@ -49,6 +49,22 @@ C_C='\033[0;36m'
 C_M='\033[1;35m'
 C_R='\033[0m'
 
+add_menu_numbers() {
+    awk '{printf "%d. %s\n", NR, $0}'
+}
+
+strip_menu_number() {
+    sed 's/^[0-9]*\. //'
+}
+
+add_list_numbers() {
+    awk '{printf "%d. |%s\n", NR, $0}'
+}
+
+strip_list_number() {
+    sed 's/^[0-9]*\. |//'
+}
+
 FZF_OPTS=(
     "--border=bold"
     "--margin=2%,8%,3%,8%"
@@ -122,7 +138,7 @@ call_api() {
             cat "$cache_file"
             return
         else
-            rm -f "$cache_file"
+            rm -f "$cache_file"898703
         fi
     fi
 
@@ -220,6 +236,7 @@ create_preview_script() {
     cat > "$script" << EOF
 #!/bin/bash
 IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
+ten=\$(echo "\$ten" | sed 's/^[0-9]*\. //')
 source="$API_SOURCE"
 
 echo -e "\033[1;36m  \${ten}\033[0m"
@@ -271,8 +288,9 @@ watch_episode() {
 
             if [[ "$server_count" -gt 1 ]]; then
                 local server_list=$(echo "$res" | jq -r '.movie.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
                 [[ -z "$server_name" ]] && return
+                server_name=$(echo "$server_name" | strip_menu_number)
                 server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.movie.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
             fi
 
@@ -289,8 +307,9 @@ watch_episode() {
 
             if [[ "$server_count" -gt 1 ]]; then
                 local server_list=$(echo "$res" | jq -r '.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
                 [[ -z "$server_name" ]] && return
+                server_name=$(echo "$server_name" | strip_menu_number)
                 server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
             fi
 
@@ -305,8 +324,9 @@ watch_episode() {
 
             if [[ "$server_count" -gt 1 ]]; then
                 local server_list=$(echo "$res" | jq -r '.data.item.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
                 [[ -z "$server_name" ]] && return
+                server_name=$(echo "$server_name" | strip_menu_number)
                 server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.data.item.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
             fi
 
@@ -325,7 +345,7 @@ watch_episode() {
     [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
 
     while true; do
-        local chon=$(echo "$ds_tap" | fzf "${FZF_OPTS[@]}" \
+        local chon=$(echo "$ds_tap" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
             --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
@@ -335,7 +355,7 @@ watch_episode() {
         local data=$(tail -n +2 <<< "$chon")
         [[ -z "$data" ]] && break
         
-        local tap=$(echo "$data" | cut -d'|' -f1)
+        local tap=$(echo "$data" | cut -d'|' -f1 | strip_menu_number)
         local url=$(echo "$data" | cut -d'|' -f2)
         local tieu_de="${ten} - Tập ${tap}"
         
@@ -370,7 +390,7 @@ show_list() {
     
     local preview=$(create_preview_script)
     
-    local chon=$(echo "$items" | fzf "${FZF_OPTS[@]}" \
+    local chon=$(echo "$items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1,2 \
         --preview="$preview {}" --preview-window=right:45%:wrap \
         --prompt="$prompt > ")
@@ -380,7 +400,7 @@ show_list() {
     if [[ -n "$chon" ]]; then
         _fav_nam=$(echo "$chon" | cut -d'|' -f2)
         _fav_anh=$(echo "$chon" | cut -d'|' -f6)
-        watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+        watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
     fi
 }
 
@@ -403,7 +423,7 @@ show_paginated_list() {
             return
         fi
         
-        local output=$(echo "$items" | fzf "${FZF_OPTS[@]}" \
+        local output=$(echo "$items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
             --delimiter='|' --with-nth=1,2 \
             --preview="$preview {}" --preview-window=right:45%:wrap \
             --header="$prompt - Trang $page  |  ← → Chuyển trang" \
@@ -427,7 +447,7 @@ show_paginated_list() {
                     rm -f "$preview"
                     _fav_nam=$(echo "$chon" | cut -d'|' -f2)
                     _fav_anh=$(echo "$chon" | cut -d'|' -f6)
-                    watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+                    watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
                     return
                 else
                     rm -f "$preview"
@@ -501,11 +521,11 @@ search() {
     local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
         --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
         --delimiter='|' --with-nth=1,2 \
-        --bind "change:reload:sleep 0.2; $search {q} || true" \
+        --bind "change:reload:sleep 0.2; $search {q} | awk '{printf \"%d. %s\\n\", NR, \$0}' || true" \
         --preview="$preview {}" --preview-window=right:45%:wrap)
     
     rm -f "$search" "$preview"
-    [[ -n "$chon" ]] && watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1)"
+    [[ -n "$chon" ]] && watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
 }
 
 new_releases() {
@@ -565,11 +585,11 @@ browse() {
             ;;
     esac
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="DUYỆT > " --height=50%)
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="DUYỆT > " --height=50%)
     [[ -z "$chon" ]] && return
     
     local loai=$(echo "$chon" | cut -d'|' -f2)
-    local ten=$(echo "$chon" | cut -d'|' -f1 | sed 's/󰎁  //')
+    local ten=$(echo "$chon" | cut -d'|' -f1 | strip_menu_number | sed 's/󰎁  //')
     
     fetch_browse() {
         fetch_list "danh-sach/${loai}" "$1"
@@ -614,11 +634,11 @@ Võ Thuật|vo-thuat"
             ;;
     esac
     
-    local chon=$(echo -e "$ds" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="THỂ LOẠI > ")
+    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="THỂ LOẠI > ")
     [[ -z "$chon" ]] && return
     
     local slug=$(echo "$chon" | cut -d'|' -f2)
-    local ten=$(echo "$chon" | cut -d'|' -f1)
+    local ten=$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)
     
     fetch_genre() {
         fetch_list "the-loai/${slug}" "$1"
@@ -662,11 +682,11 @@ Philippines|philippines"
             ;;
     esac
     
-    local chon=$(echo -e "$ds" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="QUỐC GIA > ")
+    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="QUỐC GIA > ")
     [[ -z "$chon" ]] && return
     
     local slug=$(echo "$chon" | cut -d'|' -f2)
-    local ten=$(echo "$chon" | cut -d'|' -f1)
+    local ten=$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)
     
     fetch_country() {
         fetch_list "quoc-gia/${slug}" "$1"
@@ -680,10 +700,10 @@ filter_by_year() {
     local ds=""
     for ((y=nam_hien_tai; y>=2000; y--)); do ds+="$y\n"; done
     
-    local chon=$(echo -e "$ds" | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
+    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
     [[ -z "$chon" ]] && return
     
-    local nam_chon="$chon"
+    local nam_chon=$(echo "$chon" | strip_menu_number)
     
 
     fetch_year() {
@@ -741,7 +761,7 @@ advanced_filter() {
   Quốc Gia|quocgia
   Năm|nam"
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="LỌC > " --height=40%)
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="LỌC > " --height=40%)
     [[ -z "$chon" ]] && return
     
     case "$(echo "$chon" | cut -d'|' -f2)" in
@@ -754,9 +774,9 @@ advanced_filter() {
 history() {
     [[ ! -s "$HIST" ]] && { show_error "Chưa có lịch sử"; return; }
     
-    local chon=$(sort -rn "$HIST" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=2 --prompt="LỊCH SỬ > ")
+    local chon=$(sort -rn "$HIST" | add_list_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1,3 --prompt="LỊCH SỬ > ")
     [[ -z "$chon" ]] && return
-    
+    chon=$(echo "$chon" | strip_list_number)
     play_video "$(echo "$chon" | cut -d'|' -f4)" "$(echo "$chon" | cut -d'|' -f2)"
 }
 
@@ -764,7 +784,7 @@ history() {
 favorites() {
     [[ ! -s "$FAV" ]] && { show_error "Chưa có yêu thích"; return; }
     
-    local chon=$(sort -u "$FAV" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
+    local chon=$(sort -u "$FAV" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
         --prompt="YÊU THÍCH > " --expect=enter,ctrl-d \
         --preview="echo 'Enter: Xem | Ctrl-D: Xóa'" --preview-window=top:2:wrap)
     
@@ -773,7 +793,7 @@ favorites() {
     [[ -z "$data" ]] && return
     
     local slug=$(echo "$data" | cut -d'|' -f2)
-    local ten=$(echo "$data" | cut -d'|' -f1)
+    local ten=$(echo "$data" | cut -d'|' -f1 | strip_menu_number)
     
     case "$phim" in
         enter)  watch_episode "$slug" "$ten" ;;
@@ -811,7 +831,7 @@ select_source() {
 󱃾  PhimAPI ${st_phimapi}${phimapi_mark}|phimapi
 󱃾  Nguonc ${st_nguonc}${nguonc_mark}|nguonc"
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="NGUỒN > " --height=40% \
         --header="Chọn nguồn dữ liệu phim")
     [[ -z "$chon" ]] && return
@@ -841,7 +861,7 @@ select_player() {
     
     [[ -z "$menu" ]] && { show_error "Không có trình phát"; return; }
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="TRÌNH PHÁT > " --height=40% \
         --header="Chọn trình phát mặc định")
     [[ -z "$chon" ]] && return
@@ -867,7 +887,7 @@ select_quality() {
   720p (HD)${current_mark_720}|720
   480p (SD)${current_mark_480}|480"
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="CHẤT LƯỢNG > " --height=40% \
         --header="Chọn chất lượng phát")
     [[ -z "$chon" ]] && return
@@ -889,13 +909,13 @@ clear_cache() {
 }
 
 settings() {
-    local menu="${I_PLAYER}Chọn Trình Phát|player
-${I_SOURCE}Đổi Nguồn|nguon
-${I_QUA}Chất Lượng|quality
-${I_DIR}Mở Thư Mục|folder
-${I_CACHE}Xóa Cache|cache"
+    local menu="Chọn Trình Phát ${I_PLAYER}|player
+Đổi Nguồn ${I_SOURCE}|nguon
+Chất Lượng ${I_QUA}|quality
+Mở Thư Mục ${I_DIR}|folder
+Xóa Cache ${I_CACHE}|cache"
     
-    local chon=$(echo -e "$menu" | fzf "${FZF_OPTS[@]}" \
+    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=40%)
     [[ -z "$chon" ]] && return
     
@@ -942,12 +962,11 @@ show_banner() {
     echo -e "${C_G} ⢿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠿⠛⣿⣏⣸⡿⢿⣯⣠⣴⠿⠋${C_R}"
     echo -e "${C_G} ⢸⣿⣿⣿⣿⣿⣿⣿⣿⠿⠶⣾⣿⣉⣡⣤⣿⠿⠛⠁${C_R}"
     echo -e "${C_G} ⢸⣿⣿⣿⣿⡿⠿⠿⠿⠶⠾⠛⠛⠛⠉⠁${C_R}"
-    echo ""
 }
 
 main_menu() {
-    echo -e "${I_SEARCH}Tìm Kiếm\n${I_NEW}Phim Mới\n${I_BROWSE}Duyệt Phim\n${I_ANIME}Anime\n${I_FILTER}Lọc Nâng Cao\n${I_HIST}Lịch Sử\n${I_FAV}Yêu Thích\n${I_SETTINGS}Cài Đặt\n${I_EXIT}Thoát" | \
-        fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
+    echo -e "Tìm Kiếm ${I_SEARCH}\nPhim Mới ${I_NEW}\nDuyệt Phim ${I_BROWSE}\nAnime ${I_ANIME}\nLọc Nâng Cao ${I_FILTER}\nLịch Sử ${I_HIST}\nYêu Thích ${I_FAV}\nCài Đặt ${I_SETTINGS}\nThoát ${I_EXIT}" | \
+        add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
 
 
