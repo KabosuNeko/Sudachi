@@ -261,7 +261,12 @@ fi
 
 if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
     if command -v chafa &>/dev/null; then
-        curl -s --max-time 5 "\$img_url" 2>/dev/null | chafa -s 35x18 - 2>/dev/null &
+        chafa_fmt="symbols"
+        case "\$TERM" in
+            st-*|st) chafa_fmt="kitty" ;;
+            xterm-kitty|kitty*) chafa_fmt="kitty" ;;
+        esac
+        curl -s --max-time 5 "\$img_url" 2>/dev/null | chafa -f "\$chafa_fmt" -s 35x18 - 2>/dev/null &
         wait
     fi
 fi
