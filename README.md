@@ -2,29 +2,22 @@
 
 Trình phát Phim Vietsub dành cho người dùng Linux.
 
-## 📋 Tổng quan
-
-Bộ công cụ này bao gồm:
-- **Sudachi.sh**: Script với giao diện FZF được "Gạo".
-- **Xem trước hình ảnh**: Tích hợp hiển thị ảnh ngay trong terminal.
-- Tối ưu hóa cấu hình **MPV** để xem phim & **yt-dlp** để tải xuống.
-
 ## Preview
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/5ef55ffc-62cf-4b07-9383-65ad1619bc4c" />
 
 ---
 
-## 🧩 Yêu cầu hệ thống (Dependencies)
+## 🧩 Dependencies
 
 Để chạy Sudachi, bạn cần cài đặt các gói sau:
 
-### 1. Cốt lõi (Bắt buộc)
+### 1. Bắt buộc
 * **[fzf](https://github.com/junegunn/fzf)**: Trái tim của giao diện. Dùng để tìm kiếm mờ (fuzzy finding) và hiển thị menu.
 * **[jq](https://stedolan.github.io/jq/)**: Bộ xử lý JSON, cần thiết để đọc dữ liệu từ API.
 * **[mpv](https://mpv.io/) or [vlc](https://www.videolan.org/)**: Trình phát media. Dùng để stream phim.
 * **[curl](https://curl.se/)**: Dùng để tải dữ liệu từ API.
 
-### 2. Tiện ích (Rất khuyên dùng)
+### 2. Tùy chọn
 * **[chafa](https://github.com/hpjansson/chafa)**: Đồ họa Terminal. Bắt buộc nếu muốn có tính năng **Xem trước hình ảnh**.
 * **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** & **[aria2](https://github.com/aria2/aria2)**: Cần thiết để hỗ trợ tải xuống đa luồng tốc độ cao.
 
@@ -80,12 +73,11 @@ bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/su
 # Bạn có thể tạo alias trong shell (như .bashrc hoặc .zshrc)
 alias sudachi='bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"'
 
-# Bây giờ bạn chỉ cần gõ 'sudachi' từ bất cứ đâu để chạy
 ```
 
 ---
 
-## 🎮 Điều khiển
+## 🎮 Keybind
 
 Bên trong menu Chọn Tập Phim:
 
@@ -108,29 +100,6 @@ Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config
 
 ---
 
-## Block ADS (nâng cao)
-Mặc dù MPV/VLC đã loại bỏ hoàn toàn quảng cáo Popup/Banner, nhưng tất nhiên các chủ api họ tính cả rồi :)) vẫn sẽ có những qc chèn thẳng vào video và khi tua nó sẽ ngay lập tức chạy lại từ đầu khiến ta cực kì khó chịu. Để tránh việc này thì chúng ta sẽ setup một dns ở cấp hệ thống, khuyên dùng nextdns vì nó free thừa cho nhu cầu dùng cơ bản và tốc độ rất ổn.
-- Trước tiên hãy truy cập vào [nextdns](https://my.nextdns.io/) và tạo một tài khoản cho riêng bạn sau đó:
-
-### 1. Privacy
-- Vào tab Privacy > Add a Blocklist, thêm 3 list này:
-
-    ✅ hostsVN (Chặn quảng cáo đặc thù Việt Nam)
-
-    ✅ ABPVN List (Bộ lọc quảng cáo Việt Nam nổi tiếng)
-
-    ✅ HaGeZi - Multi PRO (Bộ lọc quốc tế cực mạnh chặn Tracker)
-
-### 2. Security
-- Vào tab Security, bật tất cả tính năng (ngoại trừ Block Dynamic DNS Hostnames):
-
-    🚀 Quan trọng nhất: Block Newly Registered Domains (NRDs): Chặn các trang nhà cái/cờ bạc vừa mới lập trong 30 ngày gần đây để chạy quảng cáo. 
-
-### 3. Setup
-- Tại ngay tab setup của [nextdns](https://my.nextdns.io/) hãy đọc setup guide nó đã ghi rõ và chi tiết, khuyên dùng nextdns-cli (NextDNS Command-Line Client) vì dễ quản lí và bật/tắt dns khi cần thiết. 
-
----
-
 ## 🙏 Credits
 
 - **[PhimAPI](https://phimapi.com), [OPhim](https://ophim.cc), [NguonC](https://nguonc.com)** - Cung cấp API phim.
@@ -139,5 +108,4 @@ Mặc dù MPV/VLC đã loại bỏ hoàn toàn quảng cáo Popup/Banner, nhưng
 ---
 
 ## License
-
-Dự án này được phân phối dưới giấy phép **MIT License**. Xem file [LICENSE](LICENSE) để biết thêm thông tin.
+ **MIT License**. [LICENSE](LICENSE)
