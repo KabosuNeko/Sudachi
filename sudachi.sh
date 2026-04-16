@@ -25,9 +25,6 @@ API_PHIMAPI="https://phimapi.com"
 API_NGUONC="https://phim.nguonc.com"
 API_OPHIM1="https://ophim1.com"
 
-[ -f "$SOURCE_FILE" ] && API_SOURCE=$(cat "$SOURCE_FILE")
-[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
-
 I_SEARCH="󱇓 "
 I_NEW="󰎁 "
 I_BROWSE="󰖟 "
@@ -48,6 +45,58 @@ C_Y='\033[1;33m'
 C_C='\033[0;36m'
 C_M='\033[1;35m'
 C_R='\033[0m'
+
+load_settings() {
+    local line key value raw_source
+
+    if [[ -f "$SOURCE_FILE" ]]; then
+        IFS= read -r raw_source < "$SOURCE_FILE" || raw_source=""
+        case "$raw_source" in
+            ophim1|phimapi|nguonc) API_SOURCE="$raw_source" ;;
+        esac
+    fi
+
+    [[ -f "$CONFIG_FILE" ]] || return
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+        [[ "$line" != *"="* ]] && continue
+
+        key="${line%%=*}"
+        value="${line#*=}"
+
+        key="${key//[[:space:]]/}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+
+        case "$key" in
+            PLAYER_DEFAULT)
+                case "$value" in
+                    mpv|vlc) PLAYER_DEFAULT="$value" ;;
+                esac
+                ;;
+            QUALITY)
+                case "$value" in
+                    1080|720|480) QUALITY="$value" ;;
+                    auto|"") QUALITY="" ;;
+                esac
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+save_settings() {
+    {
+        printf 'PLAYER_DEFAULT=%s\n' "$PLAYER_DEFAULT"
+        printf 'QUALITY=%s\n' "$QUALITY"
+    } > "$CONFIG_FILE"
+    printf '%s\n' "$API_SOURCE" > "$SOURCE_FILE"
+}
 
 add_menu_numbers() {
     awk '{printf "%d. %s\n", NR, $0}'
@@ -105,13 +154,58 @@ check_dependencies() {
 
 
 cleanup() {
-    rm -f "$CACHE"/preview_*.sh "$CACHE"/search_*.sh
+    rm -f "$CACHE"/preview_*.sh "$CACHE"/search_*.sh "$CACHE"/preview.*.sh "$CACHE"/search.*.sh
 }
 trap cleanup EXIT SIGINT SIGTERM
 
 
 log_debug() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$CACHE/debug.log"
+}
+
+hash_url() {
+    local input="$1"
+
+    if command -v md5sum >/dev/null 2>&1; then
+        printf '%s' "$input" | md5sum | cut -d' ' -f1
+        return
+    fi
+
+    if command -v md5 >/dev/null 2>&1; then
+        printf '%s' "$input" | md5 -q
+        return
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$input" | sha256sum | cut -d' ' -f1
+        return
+    fi
+
+    printf '%s' "$input" | cksum | cut -d' ' -f1
+}
+
+is_cache_fresh() {
+    local file="$1" max_age="$2" now mtime
+
+    now=$(date +%s)
+
+    if mtime=$(stat -c %Y "$file" 2>/dev/null); then
+        :
+    elif mtime=$(stat -f %m "$file" 2>/dev/null); then
+        :
+    else
+        return 1
+    fi
+
+    (( now - mtime < max_age ))
+}
+
+sanitize_field() {
+    local value="$1"
+    value="${value//$'\n'/ }"
+    value="${value//$'\r'/ }"
+    value="${value//|/-}"
+    printf '%s' "$value"
 }
 
 get_base_url() {
@@ -129,23 +223,23 @@ call_api() {
     local url="${base_url}${endpoint}"
 
 
-    local cache_key=$(echo -n "$url" | md5sum | cut -d' ' -f1)
+    local cache_key
+    cache_key=$(hash_url "$url")
     local cache_file="$CACHE/${cache_key}.json"
 
     if [[ -f "$cache_file" ]]; then
-        local age=$(find "$cache_file" -mmin -60 2>/dev/null)
-        if [[ -n "$age" ]]; then
+        if is_cache_fresh "$cache_file" 3600; then
             cat "$cache_file"
             return
         else
-            rm -f "$cache_file"898703
+            rm -f "$cache_file"
         fi
     fi
 
 
     local res attempt
     for attempt in 1 2 3; do
-        res=$(curl -s --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
+        res=$(curl -fsS --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
         if echo "$res" | jq -e . >/dev/null 2>&1 && ! echo "$res" | jq -e '.status == "error" or has("error")' >/dev/null 2>&1; then
             echo "$res" > "$cache_file"
             echo "$res"
@@ -157,6 +251,85 @@ call_api() {
 
     log_debug "call_api all 3 attempts failed for $url — response: $(echo "$res" | head -c 200)"
     return 1
+}
+
+record_history() {
+    local slug="$1" title="$2" url="$3" tmp safe_title safe_url
+    safe_title=$(sanitize_field "$title")
+    safe_url=$(sanitize_field "$url")
+
+    tmp=$(mktemp "$CACHE/history.XXXXXX") || return 1
+
+    if ! awk -F'|' -v s="$slug" '$3 != s' "$HIST" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    printf '%s|%s|%s|%s\n' "$(date +%s)" "$safe_title" "$slug" "$safe_url" >> "$tmp"
+    mv "$tmp" "$HIST"
+}
+
+record_progress() {
+    local slug="$1" ep="$2" tmp
+    tmp=$(mktemp "$CACHE/progress.XXXXXX") || return 1
+
+    if ! awk -F'|' -v s="$slug" '$1 != s' "$PROGRESS" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    printf '%s|%s\n' "$slug" "$ep" >> "$tmp"
+    mv "$tmp" "$PROGRESS"
+}
+
+add_favorite() {
+    local title="$1" slug="$2" year="$3" poster="$4" tmp
+    local safe_title safe_year safe_poster
+    safe_title=$(sanitize_field "$title")
+    safe_year=$(sanitize_field "$year")
+    safe_poster=$(sanitize_field "$poster")
+
+    tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
+
+    if ! awk -F'|' -v s="$slug" '$2 != s' "$FAV" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    printf '%s|%s|%s|%s\n' "$safe_title" "$slug" "$safe_year" "$safe_poster" >> "$tmp"
+    mv "$tmp" "$FAV"
+}
+
+remove_favorite() {
+    local slug="$1" tmp
+    tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
+
+    if ! awk -F'|' -v s="$slug" '$2 != s' "$FAV" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv "$tmp" "$FAV"
+}
+
+download_episode() {
+    local url="$1" title="$2" file
+
+    if ! command -v yt-dlp >/dev/null 2>&1; then
+        show_error "Thiếu yt-dlp để tải phim"
+        return 1
+    fi
+
+    file=$(echo "$title" | sed 's/[[:space:]]\+/_/g; s/[^[:alnum:]_.-]//g').mp4
+    [[ -z "$file" || "$file" == ".mp4" ]] && file="sudachi_$(date +%s).mp4"
+
+    if command -v aria2c >/dev/null 2>&1; then
+        yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 >/dev/null 2>&1 &
+    else
+        yt-dlp "$url" -o "$DL/$file" >/dev/null 2>&1 &
+    fi
+
+    command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" " Đang tải: $title"
 }
 
 check_player() {
@@ -232,7 +405,8 @@ parse_ophim1() {
 
 
 create_preview_script() {
-    local script="$CACHE/preview_$$.sh"
+    local script
+    script=$(mktemp "$CACHE/preview.XXXXXX.sh") || return 1
     cat > "$script" << EOF
 #!/bin/bash
 IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
@@ -249,7 +423,7 @@ echo ""
 
 img_url=""
 if [[ "\$source" == "ophim1" && -n "\$slug" ]]; then
-    img_res=\$(curl -s --max-time 3 "$API_OPHIM1/v1/api/phim/\${slug}/images" 2>/dev/null)
+    img_res=\$(curl -fsS --max-time 3 "$API_OPHIM1/v1/api/phim/\${slug}/images" 2>/dev/null)
     if [[ -n "\$img_res" ]]; then
         img_url=\$(echo "\$img_res" | jq -r '(.data.images[] | select(.type=="poster") | .file_path) // .data.images[0].file_path // ""' 2>/dev/null | head -1)
         [[ -n "\$img_url" && "\$img_url" != "null" ]] && img_url="https://image.tmdb.org/t/p/w500\${img_url}"
@@ -266,7 +440,7 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
             st-*|st) chafa_fmt="kitty" ;;
             xterm-kitty|kitty*) chafa_fmt="kitty" ;;
         esac
-        curl -s --max-time 5 "\$img_url" 2>/dev/null | chafa -f "\$chafa_fmt" -s 35x18 - 2>/dev/null &
+        curl -fsS --max-time 5 "\$img_url" 2>/dev/null | chafa -f "\$chafa_fmt" -s 35x18 - 2>/dev/null &
         wait
     fi
 fi
@@ -344,7 +518,7 @@ watch_episode() {
 
     local last_ep=""
     if [[ -f "$PROGRESS" ]]; then
-        last_ep=$(grep "^${slug}|" "$PROGRESS" | tail -1 | cut -d'|' -f2)
+        last_ep=$(awk -F'|' -v s="$slug" '$1 == s {ep=$2} END {if (ep != "") print ep}' "$PROGRESS")
     fi
     local continue_header=""
     [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
@@ -366,24 +540,17 @@ watch_episode() {
         
         case "$phim" in
             enter)
-                grep -v "^.*|.*|${slug}|" "$HIST" > "$HIST.tmp" && mv "$HIST.tmp" "$HIST"
-                echo "$(date +%s)|$tieu_de|$slug|$url" >> "$HIST"
-
-                grep -v "^${slug}|" "$PROGRESS" > "$PROGRESS.tmp" && mv "$PROGRESS.tmp" "$PROGRESS"
-                echo "${slug}|${tap}" >> "$PROGRESS"
+                record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
+                record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
                 continue_header="  ▶ Tiếp: Tập ${tap}"
 
                 play_video "$url" "$tieu_de"
                 ;;
             tab)
-                local file=$(echo "$tieu_de" | sed 's/ /_/g; s/[^a-zA-Z0-9_.-]//g').mp4
-                yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 >/dev/null 2>&1 &
-                command -v notify-send >/dev/null && notify-send "Sudachi" " Đang tải: $tieu_de"
+                download_episode "$url" "$tieu_de"
                 ;;
             ctrl-f)
-                if ! grep -q "|${slug}|" "$FAV" 2>/dev/null && ! grep -q "|${slug}$" "$FAV" 2>/dev/null; then
-                    echo "$ten|$slug|${_fav_nam:-}|${_fav_anh:-}" >> "$FAV"
-                fi
+                add_favorite "$ten" "$slug" "${_fav_nam:-}" "${_fav_anh:-}" || show_error "Không lưu được yêu thích"
                 ;;
         esac
     done
@@ -393,7 +560,8 @@ show_list() {
     local items="$1" prompt="$2"
     [[ -z "$items" ]] && { show_error "Không có kết quả"; return; }
     
-    local preview=$(create_preview_script)
+    local preview
+    preview=$(create_preview_script) || { show_error "Không tạo được preview"; return; }
     
     local chon=$(echo "$items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1,2 \
@@ -413,7 +581,8 @@ show_paginated_list() {
     local prompt="$1"
     local fetch_callback="$2"
     local page=1
-    local preview=$(create_preview_script)
+    local preview
+    preview=$(create_preview_script) || { show_error "Không tạo được preview"; return; }
     
     while true; do
         local items=$($fetch_callback "$page")
@@ -488,27 +657,28 @@ fetch_list() {
 }
 
 create_search_script() {
-    local script="$CACHE/search_$$.sh"
+    local script
+    script=$(mktemp "$CACHE/search.XXXXXX.sh") || return 1
     cat > "$script" << EOF
 #!/bin/bash
 [[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
-q="\${1// /%20}"
+q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
 source="$API_SOURCE"
 
 case "\$source" in
     nguonc)
-        res=\$(curl -s --max-time 5 "$API_NGUONC/api/films/search?keyword=\${q}" 2>/dev/null)
+        res=\$(curl -fsS --max-time 5 "$API_NGUONC/api/films/search?keyword=\${q}" 2>/dev/null)
         [[ -z "\$res" ]] && exit 0
         echo "\$res" | jq -r '.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.current_episode // "N/A")|\(.slug)|\(.thumb_url)"' 2>/dev/null
         ;;
     phimapi)
-        res=\$(curl -s --max-time 5 "$API_PHIMAPI/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
+        res=\$(curl -fsS --max-time 5 "$API_PHIMAPI/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
         [[ -z "\$res" ]] && exit 0
         cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
         echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
         ;;
     *)
-        res=\$(curl -s --max-time 5 "$API_OPHIM1/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
+        res=\$(curl -fsS --max-time 5 "$API_OPHIM1/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
         [[ -z "\$res" ]] && exit 0
         cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
         echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
@@ -520,8 +690,9 @@ EOF
 }
 
 search() {
-    local search=$(create_search_script)
-    local preview=$(create_preview_script)
+    local search preview
+    search=$(create_search_script) || { show_error "Không tạo được script tìm kiếm"; return; }
+    preview=$(create_preview_script) || { rm -f "$search"; show_error "Không tạo được preview"; return; }
     
     local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
         --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
@@ -610,7 +781,7 @@ filter_by_genre() {
     
     case "$API_SOURCE" in
         nguonc)
-            res=$(curl -s --max-time 5 "${API_NGUONC}/api/the-loai" 2>/dev/null)
+            res=$(curl -fsS --max-time 5 "${API_NGUONC}/api/the-loai" 2>/dev/null)
             ds=$(echo "$res" | jq -r '.[] | "\(.name)|\(.slug)"' 2>/dev/null)
 
             if [[ -z "$ds" ]]; then
@@ -658,7 +829,7 @@ filter_by_country() {
     
     case "$API_SOURCE" in
         nguonc)
-            res=$(curl -s --max-time 5 "${API_NGUONC}/api/quoc-gia" 2>/dev/null)
+            res=$(curl -fsS --max-time 5 "${API_NGUONC}/api/quoc-gia" 2>/dev/null)
             ds=$(echo "$res" | jq -r '.[] | "\(.name)|\(.slug)"' 2>/dev/null)
 
             if [[ -z "$ds" ]]; then
@@ -732,7 +903,7 @@ filter_by_year() {
         esac
     }
     
-    show_paginated_list "Năm $chon" fetch_year
+    show_paginated_list "Năm $nam_chon" fetch_year
 }
 
 anime_mode() {
@@ -803,14 +974,14 @@ favorites() {
     case "$phim" in
         enter)  watch_episode "$slug" "$ten" ;;
         ctrl-d)
-            grep -v "|${slug}|" "$FAV" | grep -v "|${slug}$" > "$FAV.tmp" && mv "$FAV.tmp" "$FAV"
+            remove_favorite "$slug" || show_error "Không xóa được yêu thích"
             ;;
     esac
 }
 
 check_source_status() {
     local url="$1"
-    curl -s --max-time 2 --head "$url" &>/dev/null && echo "✓" || echo "✗"
+    curl -fsS --max-time 2 --head "$url" &>/dev/null && echo "✓" || echo "✗"
 }
 
 select_source() {
@@ -824,10 +995,6 @@ select_source() {
 
     echo -e "${C_C} Kiểm tra kết nối nguồn...${C_R}"
     local st_ophim st_phimapi st_nguonc
-    st_ophim=$(check_source_status "$API_OPHIM1") &
-    st_phimapi=$(check_source_status "$API_PHIMAPI") &
-    st_nguonc=$(check_source_status "$API_NGUONC") &
-    wait
     st_ophim=$(check_source_status "$API_OPHIM1")
     st_phimapi=$(check_source_status "$API_PHIMAPI")
     st_nguonc=$(check_source_status "$API_NGUONC")
@@ -849,7 +1016,7 @@ select_source() {
     fi
 
     API_SOURCE="$new_source"
-    echo "$API_SOURCE" > "$SOURCE_FILE"
+    save_settings
 }
 
 select_player() {
@@ -872,8 +1039,7 @@ select_player() {
     [[ -z "$chon" ]] && return
     
     PLAYER_DEFAULT=$(echo "$chon" | cut -d'|' -f2)
-    echo "PLAYER_DEFAULT=\"$PLAYER_DEFAULT\"" > "$CONFIG_FILE"
-    [[ -n "$QUALITY" ]] && echo "QUALITY=\"$QUALITY\"" >> "$CONFIG_FILE"
+    save_settings
 }
 
 
@@ -900,8 +1066,7 @@ select_quality() {
     local selected=$(echo "$chon" | cut -d'|' -f2)
     [[ "$selected" == "auto" ]] && QUALITY="" || QUALITY="$selected"
     
-    echo "PLAYER_DEFAULT=\"$PLAYER_DEFAULT\"" > "$CONFIG_FILE"
-    [[ -n "$QUALITY" ]] && echo "QUALITY=\"$QUALITY\"" >> "$CONFIG_FILE"
+    save_settings
 }
 
 clear_cache() {
@@ -975,6 +1140,7 @@ main_menu() {
 }
 
 
+load_settings
 check_dependencies
 check_player
 
