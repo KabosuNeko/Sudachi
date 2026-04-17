@@ -102,7 +102,7 @@ Script sẽ tự động tạo các file cấu hình tại thư mục `~/.config
 
 ## 🙏 Credits
 
-- **[PhimAPI](https://phimapi.com), [OPhim](https://ophim.cc), [NguonC](https://nguonc.com)** - Cung cấp API phim.
+- **[PhimAPI](https://phimapi.com), [OPhim](https://ophim.cc), [NguonC](https://nguonc.com), [AniMapper](https://animapper.net)** - Cung cấp API phim.
 - **[FZF](https://github.com/junegunn/fzf)** - Công cụ tìm kiếm mờ dòng lệnh.
 
 ---

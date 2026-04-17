@@ -1,8 +1,4 @@
 #!/bin/bash
-#
-# Sudachi Player
-# SPDX-License-Identifier: MIT
-# 
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
@@ -18,12 +14,15 @@ QUALITY=""
 mkdir -p "$CONF" "$DL" "$CACHE"
 [ ! -f "$HIST" ] && touch "$HIST"
 [ ! -f "$FAV" ] && touch "$FAV"
+
+TEMP_FILES=()
 [ ! -f "$PROGRESS" ] && touch "$PROGRESS"
 
 API_SOURCE="ophim1"
 API_PHIMAPI="https://phimapi.com"
 API_NGUONC="https://phim.nguonc.com"
 API_OPHIM1="https://ophim1.com"
+API_ANIMAPPER="https://api.animapper.net/api/v1"
 
 I_SEARCH="󱇓 "
 I_NEW="󰎁 "
@@ -52,7 +51,7 @@ load_settings() {
     if [[ -f "$SOURCE_FILE" ]]; then
         IFS= read -r raw_source < "$SOURCE_FILE" || raw_source=""
         case "$raw_source" in
-            ophim1|phimapi|nguonc) API_SOURCE="$raw_source" ;;
+            ophim1|phimapi|nguonc|animapper) API_SOURCE="$raw_source" ;;
         esac
     fi
 
@@ -154,7 +153,13 @@ check_dependencies() {
 
 
 cleanup() {
-    rm -f "$CACHE"/preview_*.sh "$CACHE"/search_*.sh "$CACHE"/preview.*.sh "$CACHE"/search.*.sh
+    for tmpfile in "${TEMP_FILES[@]}"; do
+        [[ -f "$tmpfile" ]] && rm -f "$tmpfile"
+    done
+}
+
+register_temp() {
+    TEMP_FILES+=("$1")
 }
 trap cleanup EXIT SIGINT SIGTERM
 
@@ -210,9 +215,10 @@ sanitize_field() {
 
 get_base_url() {
     case "$API_SOURCE" in
-        nguonc)  echo "$API_NGUONC" ;;
-        phimapi) echo "$API_PHIMAPI" ;;
-        *)       echo "$API_OPHIM1" ;;
+        nguonc)    echo "$API_NGUONC" ;;
+        phimapi)   echo "$API_PHIMAPI" ;;
+        animapper) echo "$API_ANIMAPPER" ;;
+        *)         echo "$API_OPHIM1" ;;
     esac
 }
 
@@ -283,28 +289,37 @@ record_progress() {
 }
 
 add_favorite() {
-    local title="$1" slug="$2" year="$3" poster="$4" tmp
+    local title="$1" slug="$2" year="$3" poster="$4"
+    local tmp
     local safe_title safe_year safe_poster
     safe_title=$(sanitize_field "$title")
     safe_year=$(sanitize_field "$year")
     safe_poster=$(sanitize_field "$poster")
+    local timestamp=$(date +%s)
 
     tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
 
-    if ! awk -F'|' -v s="$slug" '$2 != s' "$FAV" > "$tmp"; then
+    if ! awk -F'|' -v s="$slug" '{
+        if ($2 == s || $3 == s) next
+        print
+    }' "$FAV" > "$tmp"; then
         rm -f "$tmp"
         return 1
     fi
 
-    printf '%s|%s|%s|%s\n' "$safe_title" "$slug" "$safe_year" "$safe_poster" >> "$tmp"
+    printf '%s|%s|%s|%s|%s\n' "$timestamp" "$safe_title" "$slug" "$safe_year" "$safe_poster" >> "$tmp"
     mv "$tmp" "$FAV"
 }
 
 remove_favorite() {
-    local slug="$1" tmp
+    local slug="$1"
+    local tmp
     tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
 
-    if ! awk -F'|' -v s="$slug" '$2 != s' "$FAV" > "$tmp"; then
+    if ! awk -F'|' -v s="$slug" '{
+        if ($2 == s || $3 == s) next
+        print
+    }' "$FAV" > "$tmp"; then
         rm -f "$tmp"
         return 1
     fi
@@ -404,9 +419,327 @@ parse_ophim1() {
 }
 
 
+
+call_animapper() {
+    local endpoint="$1"
+    local url="${API_ANIMAPPER}${endpoint}"
+
+    log_debug "call_animapper: URL=$url"
+
+    local cache_key
+    cache_key=$(hash_url "$url")
+    local cache_file="$CACHE/animapper_${cache_key}.json"
+
+    if [[ -f "$cache_file" ]]; then
+        if is_cache_fresh "$cache_file" 3600; then
+            log_debug "call_animapper: returning cached result"
+            cat "$cache_file"
+            return
+        else
+            rm -f "$cache_file"
+        fi
+    fi
+
+    local res attempt
+    for attempt in 1 2 3; do
+        local max_time=30
+        if [[ "$endpoint" == *"/stream/episodes"* ]]; then
+            max_time=45
+        fi
+
+        res=$(curl -fsS --connect-timeout 10 --max-time "$max_time" "$url" 2>/dev/null)
+        local curl_exit=$?
+        log_debug "call_animapper: attempt $attempt, curl_exit=$curl_exit, response length=${#res}"
+
+        if [[ $curl_exit -ne 0 ]]; then
+            log_debug "call_animapper: curl failed with exit code $curl_exit"
+            [[ $attempt -lt 3 ]] && sleep 2
+            continue
+        fi
+
+        if echo "$res" | jq -e '.' >/dev/null 2>&1; then
+            if echo "$res" | jq -e '.success == false' >/dev/null 2>&1; then
+                log_debug "call_animapper: API returned success=false"
+                echo "$res"
+                return 1
+            fi
+
+            echo "$res" > "$cache_file"
+            echo "$res"
+            return 0
+        fi
+
+        log_debug "call_animapper attempt $attempt failed for $url (invalid JSON)"
+        [[ $attempt -lt 3 ]] && sleep 1
+    done
+
+    log_debug "call_animapper all 3 attempts failed for $url"
+    return 1
+}
+
+animapper_search() {
+    local res="$1"
+    echo "$res" | jq -r '.results[] | 
+        (if .status then " [" + .status + "]" else "" end) as $status_tag |
+        "\(.titles.vi // .titles.en // .titles.ja // "N/A")|\(.seasonYear // "N/A")\($status_tag)|\(.format // "N/A")|\(.totalUnits // "?")|\(.id)|\(.images.coverLg // "")"' 2>/dev/null
+}
+
+animapper_get_metadata() {
+    local media_id="$1"
+    call_animapper "/metadata?id=${media_id}"
+}
+
+animapper_pick_provider() {
+    local metadata_res="$1"
+    local providers_json
+    providers_json=$(echo "$metadata_res" | jq -r '.result.streamingProviders // {}' 2>/dev/null)
+
+    log_debug "animapper_pick_provider: providers_json=$providers_json"
+
+    if [[ "$providers_json" == "{}" || -z "$providers_json" ]]; then
+        log_debug "animapper_pick_provider: no providers available"
+        return 1
+    fi
+
+    local provider_list
+    provider_list=$(echo "$providers_json" | jq -r 'keys[]' 2>/dev/null)
+    if [[ -z "$provider_list" ]]; then
+        log_debug "animapper_pick_provider: empty provider list after parsing"
+        return 1
+    fi
+
+    log_debug "animapper_pick_provider: available providers: $provider_list"
+
+    local provider_count
+    provider_count=$(echo "$provider_list" | wc -l)
+
+    if [[ "$provider_count" -eq 1 ]]; then
+        log_debug "animapper_pick_provider: auto-selecting single provider: $provider_list"
+        echo "$provider_list"
+        return 0
+    fi
+
+    local header_text="Chọn provider streaming (ANIMEVIETSUB có thể chậm)"
+
+    local selected
+    selected=$(echo "$provider_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        --prompt="PROVIDER > " --header="$header_text" --height=40%)
+    [[ -z "$selected" ]] && return 1
+
+    echo "$selected" | strip_menu_number
+}
+
+animapper_get_episodes() {
+    local media_id="$1"
+    local provider="$2"
+    call_animapper "/stream/episodes?id=${media_id}&provider=${provider}&limit=100"
+}
+
+animapper_get_source() {
+    local episode_data="$1"
+    local provider="$2"
+    local server="$3"
+
+    local encoded_data
+    encoded_data=$(jq -rn --arg d "$episode_data" '$d|@uri' 2>/dev/null) || encoded_data="$episode_data"
+
+    if [[ -n "$server" ]]; then
+        call_animapper "/stream/source?episodeData=${encoded_data}&provider=${provider}&server=${server}"
+    else
+        call_animapper "/stream/source?episodeData=${encoded_data}&provider=${provider}"
+    fi
+}
+
+
+
+watch_episode_animapper() {
+    local media_id="$1" ten="$2"
+    show_loading
+
+    log_debug "watch_episode_animapper: media_id=$media_id, title=$ten"
+
+    local metadata_res provider_name episodes_res ds_tap
+
+    metadata_res=$(animapper_get_metadata "$media_id")
+    [[ -z "$metadata_res" ]] && { show_error "Không lấy được thông tin anime"; return; }
+
+    provider_name=$(animapper_pick_provider "$metadata_res")
+    if [[ -z "$provider_name" ]]; then
+        local anime_title
+        anime_title=$(echo "$metadata_res" | jq -r '.result.titles.vi // .result.titles.en // "Anime"' 2>/dev/null)
+        show_error "Anime '${anime_title}' chưa có provider nào được mapping"
+        log_debug "watch_episode_animapper: no providers for media_id=$media_id"
+        return
+    fi
+
+    log_debug "watch_episode_animapper: selected provider=$provider_name"
+
+    echo -e "${C_C} Đang tải danh sách tập từ ${provider_name}...${C_R}"
+
+    episodes_res=$(animapper_get_episodes "$media_id" "$provider_name")
+    local episodes_exit=$?
+
+    log_debug "watch_episode_animapper: episodes_res raw length=${#episodes_res}, exit=$episodes_exit"
+
+    if [[ -z "$episodes_res" ]] || [[ $episodes_exit -ne 0 ]]; then
+        show_error "Không lấy được danh sách tập từ ${provider_name} (timeout hoặc lỗi)"
+        return
+    fi
+
+    if echo "$episodes_res" | jq -e '.success == false' >/dev/null 2>&1; then
+        local err_msg
+        err_msg=$(echo "$episodes_res" | jq -r '.message // "Unknown error"' 2>/dev/null)
+        log_debug "watch_episode_animapper: API error: $err_msg"
+        show_error "Lỗi API ${provider_name}: $err_msg"
+        return
+    fi
+
+    local total_episodes
+    total_episodes=$(echo "$episodes_res" | jq -r '.total // 0' 2>/dev/null)
+
+    ds_tap=$(echo "$episodes_res" | jq -r '.episodes[] | "\(.episodeNumber)|\(.episodeId)|\(.server)"' 2>/dev/null)
+
+    local has_next_page
+    has_next_page=$(echo "$episodes_res" | jq -r '.hasNextPage // false' 2>/dev/null)
+    local offset=0
+
+    if [[ "$has_next_page" == "true" ]] && [[ -n "$ds_tap" ]]; then
+        log_debug "watch_episode_animapper: more episodes available, fetching with pagination"
+
+        local all_episodes="$ds_tap"
+        offset=100
+
+        while [[ "$has_next_page" == "true" ]] && [[ $offset -lt 500 ]]; do
+            local more_episodes
+            more_episodes=$(call_animapper "/stream/episodes?id=${media_id}&provider=${provider_name}&limit=100&offset=${offset}")
+
+            if [[ -n "$more_episodes" ]]; then
+                local page_episodes
+                page_episodes=$(echo "$more_episodes" | jq -r '.episodes[] | "\(.episodeNumber)|\(.episodeId)|\(.server)"' 2>/dev/null)
+                if [[ -n "$page_episodes" ]]; then
+                    all_episodes="$all_episodes
+$page_episodes"
+                fi
+                has_next_page=$(echo "$more_episodes" | jq -r '.hasNextPage // false' 2>/dev/null)
+                offset=$((offset + 100))
+            else
+                break
+            fi
+        done
+
+        ds_tap="$all_episodes"
+    fi
+
+    if [[ -z "$ds_tap" ]]; then
+        show_error "Không có tập phim nào từ ${provider_name}"
+        return
+    fi
+
+    local last_ep=""
+    if [[ -f "$PROGRESS" ]]; then
+        last_ep=$(awk -F'|' -v s="$media_id" '$1 == s {ep=$2} END {if (ep != "") print ep}' "$PROGRESS")
+    fi
+    local continue_header=""
+    [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
+
+    log_debug "watch_episode_animapper: total=$total_episodes, last_ep=$last_ep"
+
+    while true; do
+        local chon=$(echo "$ds_tap" | fzf "${FZF_OPTS[@]}" \
+            --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
+            --delimiter='|' --with-nth=1 \
+            --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
+            --preview-window=top:3:wrap --expect=enter,tab,ctrl-f)
+
+        local phim=$(head -1 <<< "$chon")
+        local data=$(tail -n +2 <<< "$chon")
+        [[ -z "$data" ]] && break
+
+        local tap=$(echo "$data" | cut -d'|' -f1)
+        local episode_id=$(echo "$data" | cut -d'|' -f2)
+        local server=$(echo "$data" | cut -d'|' -f3)
+
+        local tieu_de="${ten} - Tập ${tap}"
+
+        log_debug "watch_episode_animapper: selected tap=$tap, episode_id=$episode_id, server=$server"
+
+        show_loading
+        local source_res stream_url stream_type
+        source_res=$(animapper_get_source "$episode_id" "$provider_name" "$server")
+
+        if [[ -z "$source_res" ]]; then
+            show_error "Không lấy được nguồn phát"
+            continue
+        fi
+
+        stream_url=$(echo "$source_res" | jq -r '.url // empty' 2>/dev/null)
+        stream_type=$(echo "$source_res" | jq -r '.type // "HLS"' 2>/dev/null)
+
+        [[ -z "$stream_url" ]] && { show_error "Không có URL phát"; continue; }
+
+        log_debug "watch_episode_animapper: stream_url=$stream_url, type=$stream_type"
+
+        case "$phim" in
+            enter)
+                record_history "$media_id" "$tieu_de" "$stream_url" || show_error "Không ghi được lịch sử"
+                record_progress "$media_id" "$tap" || show_error "Không ghi được tiến độ"
+                continue_header="  ▶ Tiếp: Tập ${tap}"
+
+                if [[ "$stream_type" == "HLS" && "$stream_url" == *"/api/v1/stream/source/m3u8/"* ]]; then
+                    local proxy_headers
+                    proxy_headers=$(echo "$source_res" | jq -r '.proxyHeaders // {}' 2>/dev/null)
+                    play_animapper_hls "$stream_url" "$tieu_de" "$proxy_headers"
+                else
+                    play_video "$stream_url" "$tieu_de"
+                fi
+                ;;
+            tab)
+                download_episode "$stream_url" "$tieu_de"
+                ;;
+            ctrl-f)
+                add_favorite "$ten" "$media_id" "" "" || show_error "Không lưu được yêu thích"
+                ;;
+        esac
+    done
+}
+
+
+play_animapper_hls() {
+    local stream_url="$1" title="$2" proxy_headers="$3"
+
+    local cache_key
+    cache_key=$(basename "$stream_url")
+
+    local real_m3u8_url="${API_ANIMAPPER}/stream/source/m3u8/${cache_key}"
+
+    local extra_headers=()
+    if [[ "$proxy_headers" != "{}" && -n "$proxy_headers" ]]; then
+        local referer
+        referer=$(echo "$proxy_headers" | jq -r '.Referer // empty' 2>/dev/null)
+        [[ -n "$referer" ]] && extra_headers+=("--referrer=$referer")
+    fi
+
+    case "$PLAYER_DEFAULT" in
+        vlc)
+            local vlc_args=("$real_m3u8_url" "--meta-title=$title" "--no-video-title-show" "${extra_headers[@]}")
+            [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
+            vlc "${vlc_args[@]}" >/dev/null 2>&1 &
+            ;;
+        *)
+            local mpv_args=("$real_m3u8_url" "--title=$title" "--force-window" "${extra_headers[@]}")
+            if [[ -n "$QUALITY" ]]; then
+                mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
+            fi
+            mpv "${mpv_args[@]}" >/dev/null 2>&1 &
+            ;;
+    esac
+}
+
+
 create_preview_script() {
     local script
     script=$(mktemp "$CACHE/preview.XXXXXX.sh") || return 1
+    register_temp "$script"
     cat > "$script" << EOF
 #!/bin/bash
 IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
@@ -452,8 +785,14 @@ EOF
 
 watch_episode() {
     local slug="$1" ten="$2"
+
+    if [[ "$API_SOURCE" == "animapper" ]]; then
+        watch_episode_animapper "$slug" "$ten"
+        return
+    fi
+
     show_loading
-    
+
     local res ds_tap server_name
 
     case "$API_SOURCE" in
@@ -524,20 +863,20 @@ watch_episode() {
     [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
 
     while true; do
-        local chon=$(echo "$ds_tap" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        local chon=$(echo "$ds_tap" | fzf "${FZF_OPTS[@]}" \
             --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f)
-        
+
         local phim=$(head -1 <<< "$chon")
         local data=$(tail -n +2 <<< "$chon")
         [[ -z "$data" ]] && break
-        
-        local tap=$(echo "$data" | cut -d'|' -f1 | strip_menu_number)
+
+        local tap=$(echo "$data" | cut -d'|' -f1)
         local url=$(echo "$data" | cut -d'|' -f2)
         local tieu_de="${ten} - Tập ${tap}"
-        
+
         case "$phim" in
             enter)
                 record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
@@ -550,7 +889,7 @@ watch_episode() {
                 download_episode "$url" "$tieu_de"
                 ;;
             ctrl-f)
-                add_favorite "$ten" "$slug" "${_fav_nam:-}" "${_fav_anh:-}" || show_error "Không lưu được yêu thích"
+                add_favorite "$ten" "$slug" "" "" || show_error "Không lưu được yêu thích"
                 ;;
         esac
     done
@@ -559,20 +898,18 @@ watch_episode() {
 show_list() {
     local items="$1" prompt="$2"
     [[ -z "$items" ]] && { show_error "Không có kết quả"; return; }
-    
+
     local preview
     preview=$(create_preview_script) || { show_error "Không tạo được preview"; return; }
-    
+
     local chon=$(echo "$items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1,2 \
         --preview="$preview {}" --preview-window=right:45%:wrap \
         --prompt="$prompt > ")
-    
+
     rm -f "$preview"
-    
+
     if [[ -n "$chon" ]]; then
-        _fav_nam=$(echo "$chon" | cut -d'|' -f2)
-        _fav_anh=$(echo "$chon" | cut -d'|' -f6)
         watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
     fi
 }
@@ -619,8 +956,6 @@ show_paginated_list() {
             enter|"")
                 if [[ -n "$chon" ]]; then
                     rm -f "$preview"
-                    _fav_nam=$(echo "$chon" | cut -d'|' -f2)
-                    _fav_anh=$(echo "$chon" | cut -d'|' -f6)
                     watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
                     return
                 else
@@ -659,6 +994,7 @@ fetch_list() {
 create_search_script() {
     local script
     script=$(mktemp "$CACHE/search.XXXXXX.sh") || return 1
+    register_temp "$script"
     cat > "$script" << EOF
 #!/bin/bash
 [[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
@@ -689,19 +1025,65 @@ EOF
     echo "$script"
 }
 
+create_animapper_search_script() {
+    local script
+    script=$(mktemp "$CACHE/search_animapper.XXXXXX.sh") || return 1
+    register_temp "$script"
+    cat > "$script" << 'EOF'
+#!/bin/bash
+[[ -z "$1" || ${#1} -lt 2 ]] && exit 0
+q=$(jq -rn --arg q "$1" '$q|@uri' 2>/dev/null) || exit 0
+
+res=$(curl -fsS --max-time 5 "https://api.animapper.net/api/v1/search?title=${q}&mediaType=ANIME&limit=20" 2>/dev/null)
+[[ -z "$res" ]] && exit 0
+
+echo "$res" | jq -r '.results[] |
+    (if .status then " [" + .status + "]" else "" end) as $status_tag |
+    "\(.titles.vi // .titles.en // .titles.ja // "N/A")|\(.seasonYear // "N/A")\($status_tag)|\(.format // "N/A")|\(.totalUnits // "?")|\(.id)|\(.images.coverLg // "")"' 2>/dev/null
+EOF
+    chmod +x "$script"
+    echo "$script"
+}
+
 search() {
+    if [[ "$API_SOURCE" == "animapper" ]]; then
+        search_animapper
+        return
+    fi
+
     local search preview
     search=$(create_search_script) || { show_error "Không tạo được script tìm kiếm"; return; }
     preview=$(create_preview_script) || { rm -f "$search"; show_error "Không tạo được preview"; return; }
-    
+
     local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
         --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
         --delimiter='|' --with-nth=1,2 \
         --bind "change:reload:sleep 0.2; $search {q} | awk '{printf \"%d. %s\\n\", NR, \$0}' || true" \
         --preview="$preview {}" --preview-window=right:45%:wrap)
-    
+
     rm -f "$search" "$preview"
     [[ -n "$chon" ]] && watch_episode "$(echo "$chon" | cut -d'|' -f5)" "$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)"
+}
+
+search_animapper() {
+    local search_script preview
+    search_script=$(create_animapper_search_script) || { show_error "Không tạo được script tìm kiếm"; return; }
+    preview=$(create_preview_script) || { rm -f "$search_script"; show_error "Không tạo được preview"; return; }
+
+    local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
+        --prompt="󱇒 TÌM ANIME > " --header="Nhập tên anime..." --phony \
+        --delimiter='|' --with-nth=1,2 \
+        --bind "change:reload:sleep 0.2; $search_script {q} | awk '{printf \"%d. %s\\n\", NR, \$0}' || true" \
+        --preview="$preview {}" --preview-window=right:45%:wrap)
+
+    rm -f "$search_script" "$preview"
+
+    if [[ -n "$chon" ]]; then
+        local media_id title
+        media_id=$(echo "$chon" | cut -d'|' -f5)
+        title=$(echo "$chon" | cut -d'|' -f1 | strip_menu_number)
+        watch_episode_animapper "$media_id" "$title"
+    fi
 }
 
 new_releases() {
@@ -907,6 +1289,10 @@ filter_by_year() {
 }
 
 anime_mode() {
+    if [[ "$API_SOURCE" == "animapper" ]]; then
+        search_animapper
+        return
+    fi
 
     fetch_anime() {
         local p="$1"
@@ -959,18 +1345,28 @@ history() {
 
 favorites() {
     [[ ! -s "$FAV" ]] && { show_error "Chưa có yêu thích"; return; }
-    
-    local chon=$(sort -u "$FAV" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
+
+    local parsed_favs
+    parsed_favs=$(awk -F'|' '{
+        if (NF == 4) {
+        } else if (NF >= 5) {
+            print
+        }
+    }' "$FAV" | sort -t'|' -k1,1rn | cut -d'|' -f2-)
+
+    [[ -z "$parsed_favs" ]] && { show_error "Chưa có yêu thích"; return; }
+
+    local chon=$(echo "$parsed_favs" | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
         --prompt="YÊU THÍCH > " --expect=enter,ctrl-d \
         --preview="echo 'Enter: Xem | Ctrl-D: Xóa'" --preview-window=top:2:wrap)
-    
+
     local phim=$(head -1 <<< "$chon")
     local data=$(tail -n +2 <<< "$chon")
     [[ -z "$data" ]] && return
-    
+
     local slug=$(echo "$data" | cut -d'|' -f2)
-    local ten=$(echo "$data" | cut -d'|' -f1 | strip_menu_number)
-    
+    local ten=$(echo "$data" | cut -d'|' -f1)
+
     case "$phim" in
         enter)  watch_episode "$slug" "$ten" ;;
         ctrl-d)
@@ -985,23 +1381,26 @@ check_source_status() {
 }
 
 select_source() {
-    local phimapi_mark="" nguonc_mark="" ophim1_mark=""
-    
+    local phimapi_mark="" nguonc_mark="" ophim1_mark="" animapper_mark=""
+
     case "$API_SOURCE" in
-        phimapi) phimapi_mark=" (đang dùng)" ;;
-        nguonc)  nguonc_mark=" (đang dùng)" ;;
-        *)       ophim1_mark=" (đang dùng)" ;;
+        phimapi)   phimapi_mark=" (đang dùng)" ;;
+        nguonc)    nguonc_mark=" (đang dùng)" ;;
+        animapper) animapper_mark=" (đang dùng)" ;;
+        *)         ophim1_mark=" (đang dùng)" ;;
     esac
 
     echo -e "${C_C} Kiểm tra kết nối nguồn...${C_R}"
-    local st_ophim st_phimapi st_nguonc
+    local st_ophim st_phimapi st_nguonc st_animapper
     st_ophim=$(check_source_status "$API_OPHIM1")
     st_phimapi=$(check_source_status "$API_PHIMAPI")
     st_nguonc=$(check_source_status "$API_NGUONC")
-    
+    st_animapper=$(check_source_status "$API_ANIMAPPER")
+
     local menu="󱃾  Ophim1 ${st_ophim}${ophim1_mark}|ophim1
 󱃾  PhimAPI ${st_phimapi}${phimapi_mark}|phimapi
-󱃾  Nguonc ${st_nguonc}${nguonc_mark}|nguonc"
+󱃾  Nguonc ${st_nguonc}${nguonc_mark}|nguonc
+󱃾  AniMapper ${st_animapper}${animapper_mark}|animapper"
     
     local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="NGUỒN > " --height=40% \
@@ -1102,9 +1501,10 @@ show_banner() {
     clear
     local nguon_text player_text quality_text
     case "$API_SOURCE" in
-        nguonc)  nguon_text="Nguonc" ;;
-        phimapi) nguon_text="PhimAPI" ;;
-        *)       nguon_text="Ophim1" ;;
+        nguonc)    nguon_text="Nguonc" ;;
+        phimapi)   nguon_text="PhimAPI" ;;
+        animapper) nguon_text="AniMapper" ;;
+        *)         nguon_text="Ophim1" ;;
     esac
     case "$PLAYER_DEFAULT" in
         vlc) player_text="VLC" ;;
@@ -1135,8 +1535,27 @@ show_banner() {
 }
 
 main_menu() {
-    echo -e "Tìm Kiếm ${I_SEARCH}\nPhim Mới ${I_NEW}\nDuyệt Phim ${I_BROWSE}\nAnime ${I_ANIME}\nLọc Nâng Cao ${I_FILTER}\nLịch Sử ${I_HIST}\nYêu Thích ${I_FAV}\nCài Đặt ${I_SETTINGS}\nThoát ${I_EXIT}" | \
-        add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
+    local menu_items=""
+
+    menu_items+="Tìm Kiếm ${I_SEARCH}\n"
+
+    if [[ "$API_SOURCE" != "animapper" ]]; then
+        menu_items+="Phim Mới ${I_NEW}\n"
+        menu_items+="Duyệt Phim ${I_BROWSE}\n"
+    fi
+
+    menu_items+="Anime ${I_ANIME}\n"
+
+    if [[ "$API_SOURCE" != "animapper" ]]; then
+        menu_items+="Lọc Nâng Cao ${I_FILTER}\n"
+    fi
+
+    menu_items+="Lịch Sử ${I_HIST}\n"
+    menu_items+="Yêu Thích ${I_FAV}\n"
+    menu_items+="Cài Đặt ${I_SETTINGS}\n"
+    menu_items+="Thoát ${I_EXIT}"
+
+    echo -e "$menu_items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
 
 
