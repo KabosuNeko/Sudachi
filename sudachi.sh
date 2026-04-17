@@ -1289,10 +1289,6 @@ filter_by_year() {
 }
 
 anime_mode() {
-    if [[ "$API_SOURCE" == "animapper" ]]; then
-        search_animapper
-        return
-    fi
 
     fetch_anime() {
         local p="$1"
@@ -1542,9 +1538,8 @@ main_menu() {
     if [[ "$API_SOURCE" != "animapper" ]]; then
         menu_items+="Phim Mới ${I_NEW}\n"
         menu_items+="Duyệt Phim ${I_BROWSE}\n"
-    fi
-
-    menu_items+="Anime ${I_ANIME}\n"
+		menu_items+="Anime ${I_ANIME}\n"
+	fi
 
     if [[ "$API_SOURCE" != "animapper" ]]; then
         menu_items+="Lọc Nâng Cao ${I_FILTER}\n"
