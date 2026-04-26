@@ -371,17 +371,18 @@ check_player() {
 
 
 play_video() {
-    local url="$1"
-    local title="$2"
-    
+    local url="$1" title="$2"
+    shift 2
+    local extra_args=("$@")
+
     case "$PLAYER_DEFAULT" in
         vlc)
-            local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show")
+            local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" "${extra_args[@]}")
             [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
             vlc "${vlc_args[@]}" >/dev/null 2>&1 &
             ;;
         *)
-            local mpv_args=("$url" "--title=$title" "--force-window")
+            local mpv_args=("$url" "--title=$title" "--force-window" "${extra_args[@]}")
             if [[ -n "$QUALITY" ]]; then
                 mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
             fi
@@ -400,22 +401,17 @@ parse_phimapi_v3() {
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(.poster_url)"' 2>/dev/null
 }
 
-parse_phimapi_v1() {
-    echo "$1" | jq -r --arg cdn "$2" '.data.items[] | 
+parse_v1_items() {
+    # Shared by phimapi and ophim1 — both return the same .data.items[] shape.
+    echo "$1" | jq -r --arg cdn "$2" '.data.items[] |
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' 2>/dev/null
 }
 
 parse_nguonc() {
-    echo "$1" | jq -r '.items[] | 
+    echo "$1" | jq -r '.items[] |
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.current_episode // "N/A")|\(.slug)|\(.thumb_url)"' 2>/dev/null
-}
-
-parse_ophim1() {
-    echo "$1" | jq -r --arg cdn "$2" '.data.items[] | 
-        (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
-        "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' 2>/dev/null
 }
 
 
@@ -445,6 +441,8 @@ call_animapper() {
         local max_time=30
         if [[ "$endpoint" == *"/stream/episodes"* ]]; then
             max_time=45
+        elif [[ "$endpoint" == *"/stream/source"* ]]; then
+            max_time=60
         fi
 
         res=$(curl -fsS --connect-timeout 10 --max-time "$max_time" "$url" 2>/dev/null)
@@ -657,18 +655,29 @@ $page_episodes"
 
         local tap=$(echo "$data" | cut -d'|' -f1)
         local episode_id=$(echo "$data" | cut -d'|' -f2)
-        local server=$(echo "$data" | cut -d'|' -f3)
 
         local tieu_de="${ten} - Tập ${tap}"
 
-        log_debug "watch_episode_animapper: selected tap=$tap, episode_id=$episode_id, server=$server"
+        log_debug "watch_episode_animapper: selected tap=$tap, episode_id=$episode_id"
 
         show_loading
-        local source_res stream_url stream_type
-        source_res=$(animapper_get_source "$episode_id" "$provider_name" "$server")
+        local source_res source_exit stream_url stream_type
+        # Do not pass $server — episodes[].server is the fansub group (e.g. AnimeVsub),
+        # not a streaming server name (DU/HDX). Let AniMapper auto-select.
+        source_res=$(animapper_get_source "$episode_id" "$provider_name")
+        source_exit=$?
 
-        if [[ -z "$source_res" ]]; then
-            show_error "Không lấy được nguồn phát"
+        if [[ -z "$source_res" ]] || [[ $source_exit -ne 0 ]]; then
+            show_error "Không lấy được nguồn phát (timeout hoặc lỗi kết nối)"
+            continue
+        fi
+
+        if echo "$source_res" | jq -e '.success == false' >/dev/null 2>&1; then
+            local err_msg err_code
+            err_msg=$(echo "$source_res" | jq -r '.message // "Unknown error"' 2>/dev/null)
+            err_code=$(echo "$source_res" | jq -r '.code // "UNKNOWN"' 2>/dev/null)
+            log_debug "watch_episode_animapper: source API error: $err_code - $err_msg"
+            show_error "Lỗi nguồn phát ${provider_name}: [$err_code] $err_msg"
             continue
         fi
 
@@ -707,32 +716,17 @@ $page_episodes"
 play_animapper_hls() {
     local stream_url="$1" title="$2" proxy_headers="$3"
 
-    local cache_key
+    local cache_key real_m3u8_url extra_headers=()
     cache_key=$(basename "$stream_url")
+    real_m3u8_url="${API_ANIMAPPER}/stream/source/m3u8/${cache_key}"
 
-    local real_m3u8_url="${API_ANIMAPPER}/stream/source/m3u8/${cache_key}"
-
-    local extra_headers=()
     if [[ "$proxy_headers" != "{}" && -n "$proxy_headers" ]]; then
         local referer
         referer=$(echo "$proxy_headers" | jq -r '.Referer // empty' 2>/dev/null)
         [[ -n "$referer" ]] && extra_headers+=("--referrer=$referer")
     fi
 
-    case "$PLAYER_DEFAULT" in
-        vlc)
-            local vlc_args=("$real_m3u8_url" "--meta-title=$title" "--no-video-title-show" "${extra_headers[@]}")
-            [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
-            vlc "${vlc_args[@]}" >/dev/null 2>&1 &
-            ;;
-        *)
-            local mpv_args=("$real_m3u8_url" "--title=$title" "--force-window" "${extra_headers[@]}")
-            if [[ -n "$QUALITY" ]]; then
-                mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
-            fi
-            mpv "${mpv_args[@]}" >/dev/null 2>&1 &
-            ;;
-    esac
+    play_video "$real_m3u8_url" "$title" "${extra_headers[@]}"
 }
 
 
@@ -783,6 +777,27 @@ EOF
 }
 
 
+# Prompt user to pick a server when multiple are available.
+# Arguments: JSON response, jq path to the episodes array.
+# Outputs: server index (0-based) to stdout. Returns 1 on cancel.
+pick_server() {
+    local res="$1" episodes_path="$2"
+    local count idx=0
+
+    count=$(echo "$res" | jq "${episodes_path} | length" 2>/dev/null)
+    if [[ "${count:-0}" -gt 1 ]]; then
+        local list name
+        list=$(echo "$res" | jq -r "${episodes_path}[] | .server_name" 2>/dev/null)
+        name=$(echo "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+        [[ -z "$name" ]] && return 1
+        name=$(echo "$name" | strip_menu_number)
+        idx=$(echo "$res" | jq -r --arg sn "$name" "[${episodes_path}[].server_name] | to_entries[] | select(.value==\$sn) | .key" 2>/dev/null | head -1)
+        [[ -z "$idx" ]] && idx=0
+    fi
+
+    printf '%s\n' "$idx"
+}
+
 watch_episode() {
     local slug="$1" ten="$2"
 
@@ -793,25 +808,14 @@ watch_episode() {
 
     show_loading
 
-    local res ds_tap server_name
+    local res ds_tap server_idx
 
     case "$API_SOURCE" in
         nguonc)
             res=$(call_api "/api/film/$slug")
             [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
-
-            local server_count=$(echo "$res" | jq '.movie.episodes | length' 2>/dev/null)
-            local server_idx=0
-
-            if [[ "$server_count" -gt 1 ]]; then
-                local server_list=$(echo "$res" | jq -r '.movie.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
-                [[ -z "$server_name" ]] && return
-                server_name=$(echo "$server_name" | strip_menu_number)
-                server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.movie.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
-            fi
-
+            server_idx=$(pick_server "$res" '.movie.episodes') || return
             ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.movie.episodes[$idx].items[] | "\(.name)|\(.embed)"' 2>/dev/null)
             [[ -z "$ds_tap" ]] && ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.movie.episodes[$idx].items[] | "\(.name)|\(.m3u8)"' 2>/dev/null)
             ds_tap=$(echo "$ds_tap" | awk -F'|' '$2 != "" && $2 != "null"')
@@ -820,34 +824,14 @@ watch_episode() {
             res=$(call_api "/phim/$slug")
             [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
-            local server_count=$(echo "$res" | jq '.episodes | length' 2>/dev/null)
-            local server_idx=0
-
-            if [[ "$server_count" -gt 1 ]]; then
-                local server_list=$(echo "$res" | jq -r '.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
-                [[ -z "$server_name" ]] && return
-                server_name=$(echo "$server_name" | strip_menu_number)
-                server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
-            fi
-
+            server_idx=$(pick_server "$res" '.episodes') || return
             ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' 2>/dev/null)
             ;;
         *)
             res=$(call_api "/v1/api/phim/$slug")
             [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
-            local server_count=$(echo "$res" | jq '.data.item.episodes | length' 2>/dev/null)
-            local server_idx=0
-
-            if [[ "$server_count" -gt 1 ]]; then
-                local server_list=$(echo "$res" | jq -r '.data.item.episodes[] | .server_name' 2>/dev/null)
-                server_name=$(echo "$server_list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
-                [[ -z "$server_name" ]] && return
-                server_name=$(echo "$server_name" | strip_menu_number)
-                server_idx=$(echo "$res" | jq -r --arg sn "$server_name" '[.data.item.episodes[].server_name] | to_entries[] | select(.value==$sn) | .key' 2>/dev/null | head -1)
-            fi
-
+            server_idx=$(pick_server "$res" '.data.item.episodes') || return
             ds_tap=$(echo "$res" | jq -r --argjson idx "$server_idx" '.data.item.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' 2>/dev/null)
             ;;
     esac
@@ -980,13 +964,13 @@ fetch_list() {
             res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
             [[ -z "$res" ]] && return
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            parse_phimapi_v1 "$res" "$cdn"
+            parse_v1_items "$res" "$cdn"
             ;;
         *)
             res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
             [[ -z "$res" ]] && return
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            parse_ophim1 "$res" "$cdn"
+            parse_v1_items "$res" "$cdn"
             ;;
     esac
 }
@@ -1029,17 +1013,18 @@ create_animapper_search_script() {
     local script
     script=$(mktemp "$CACHE/search_animapper.XXXXXX.sh") || return 1
     register_temp "$script"
-    cat > "$script" << 'EOF'
+    cat > "$script" << EOF
 #!/bin/bash
-[[ -z "$1" || ${#1} -lt 2 ]] && exit 0
-q=$(jq -rn --arg q "$1" '$q|@uri' 2>/dev/null) || exit 0
+API_ANIMAPPER="$API_ANIMAPPER"
+[[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
+q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
 
-res=$(curl -fsS --max-time 5 "https://api.animapper.net/api/v1/search?title=${q}&mediaType=ANIME&limit=20" 2>/dev/null)
-[[ -z "$res" ]] && exit 0
+res=\$(curl -fsS --max-time 5 "\${API_ANIMAPPER}/search?title=\${q}&mediaType=ANIME&limit=20" 2>/dev/null)
+[[ -z "\$res" ]] && exit 0
 
-echo "$res" | jq -r '.results[] |
-    (if .status then " [" + .status + "]" else "" end) as $status_tag |
-    "\(.titles.vi // .titles.en // .titles.ja // "N/A")|\(.seasonYear // "N/A")\($status_tag)|\(.format // "N/A")|\(.totalUnits // "?")|\(.id)|\(.images.coverLg // "")"' 2>/dev/null
+echo "\$res" | jq -r '.results[] |
+    (if .status then " [" + .status + "]" else "" end) as \$status_tag |
+    "\(.titles.vi // .titles.en // .titles.ja // "N/A")|\(.seasonYear // "N/A")\(\$status_tag)|\(.format // "N/A")|\(.totalUnits // "?")|\(.id)|\(.images.coverLg // "")"' 2>/dev/null
 EOF
     chmod +x "$script"
     echo "$script"
@@ -1110,7 +1095,7 @@ new_releases() {
             res=$(call_api "/v1/api/home")
             [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
             cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-            show_list "$(parse_ophim1 "$res" "$cdn")" "PHIM MỚI"
+            show_list "$(parse_v1_items "$res" "$cdn")" "PHIM MỚI"
             ;;
     esac
 }
@@ -1343,6 +1328,8 @@ favorites() {
     [[ ! -s "$FAV" ]] && { show_error "Chưa có yêu thích"; return; }
 
     local parsed_favs
+    # Old favorites lacked a poster field (4 fields). Skip them silently.
+    # Current format has 5 fields: timestamp|title|slug|year|poster.
     parsed_favs=$(awk -F'|' '{
         if (NF == 4) {
         } else if (NF >= 5) {
@@ -1538,8 +1525,8 @@ main_menu() {
     if [[ "$API_SOURCE" != "animapper" ]]; then
         menu_items+="Phim Mới ${I_NEW}\n"
         menu_items+="Duyệt Phim ${I_BROWSE}\n"
-		menu_items+="Anime ${I_ANIME}\n"
-	fi
+        menu_items+="Anime ${I_ANIME}\n"
+    fi
 
     if [[ "$API_SOURCE" != "animapper" ]]; then
         menu_items+="Lọc Nâng Cao ${I_FILTER}\n"
