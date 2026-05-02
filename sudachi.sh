@@ -414,6 +414,15 @@ parse_nguonc() {
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.current_episode // "N/A")|\(.slug)|\(.thumb_url)"' 2>/dev/null
 }
 
+safe_parse() {
+    local parser="$1"; shift
+    if ! declare -F "$parser" >/dev/null 2>&1; then
+        echo "Bỏ qua nguồn lỗi: parser không tồn tại: $parser" >&2
+        return 1
+    fi
+    "$parser" "$@"
+}
+
 
 
 call_animapper() {
@@ -1258,14 +1267,14 @@ filter_by_year() {
                 res=$(call_api "/v1/api/nam/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                parse_phimapi_v1 "$res" "$cdn"
+                parse_v1_items "$res" "$cdn"
                 ;;
             *)
                 local res cdn
                 res=$(call_api "/v1/api/nam-phat-hanh/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                parse_ophim1 "$res" "$cdn"
+                parse_v1_items "$res" "$cdn"
                 ;;
         esac
     }
@@ -1284,14 +1293,14 @@ anime_mode() {
                 res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                parse_phimapi_v1 "$res" "$cdn"
+                parse_v1_items "$res" "$cdn"
                 ;;
             *)
                 local res cdn
                 res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
                 [[ -z "$res" ]] && return
                 cdn=$(echo "$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-                parse_ophim1 "$res" "$cdn"
+                parse_v1_items "$res" "$cdn"
                 ;;
         esac
     }
