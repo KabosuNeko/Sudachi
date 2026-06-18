@@ -6,15 +6,15 @@
 </p>
 <p><br/></p>
 
-A Linux terminal-based Vietnamese-subtitled movie/TV/anime player.
+Trình phim/TV/anime phụ đề Việt chạy trong Terminal, dành cho Linux.
 
 ## Dependencies
 
-**Required:** `fzf` + `jq` + `curl` — plus `mpv` or `vlc` for playback.
+**Bắt buộc:** `fzf` + `jq` + `curl` — kèm `mpv` hoặc `vlc` để phát.
 
-**Optional:** `chafa` (poster preview), `yt-dlp` + `aria2c` (multi-thread downloads), `notify-send` (download notification).
+**Khuyến nghị thêm:** `chafa` (poster preview), `yt-dlp` + `aria2c` (tải đa luồng), `notify-send` (thông báo khi tải xong).
 
-### Installation by distro
+### Cài đặt theo distro
 
 **Arch**
 ```bash
@@ -24,7 +24,7 @@ sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify
 **Debian/Ubuntu**
 ```bash
 sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa
-# yt-dlp from apt is often outdated — install binary manually:
+# yt-dlp từ apt thường bản cũ — hãy cài binary thủ công:
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
@@ -36,34 +36,34 @@ sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify
 
 ## Quick start
 
-### Run directly (no install)
+### Chạy trực tiếp (không cần cài đặt)
 ```bash
 bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"
 ```
 
-### Or add an alias to `~/.bashrc`
+### Hoặc thêm alias vào `~/.bashrc`
 ```bash
 alias sudachi='bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"'
 ```
 
-## Key bindings (episode picker)
+## Hệ thống Phím tắt (episode picker)
 
-| Key | Action |
+| Phím | Chức năng |
 | :--- | :--- |
-| **Enter** | Play |
-| **Tab** | Download (saves to `~/Downloads/Sudachi-Downloaded`) |
-| **Ctrl+F** | Add to favorites |
-| **Esc** | Go back / exit |
+| **Enter** | Phát |
+| **Tab** | Tải xuống (lưu vào `~/Downloads/Sudachi-Downloaded`) |
+| **Ctrl+F** | Thêm vào Yêu thích |
+| **Esc** | Quay lại / thoát |
 
-## Configuration
+## Cấu hình
 
-Auto-created at `~/.config/sudachi/`:
-- `config` — player (`mpv`/`vlc`) and quality
-- `source.conf` — API source name
-- `history.log` — watch history
-- `favorites.log` — favorite movies
-- `progress.log` — in-progress episodes
-- `cache/` — API response cache (cleared when source changes)
+Tự động tạo tại `~/.config/sudachi/`:
+- `config` — player (`mpv`/`vlc`) và chất lượng
+- `source.conf` — tên API source
+- `history.log` — lịch sử xem
+- `favorites.log` — phim yêu thích
+- `progress.log` — tập đang xem dở
+- `cache/` — cache response từ API (bị xoá khi đổi source)
 
 ## API sources
 
