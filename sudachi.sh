@@ -1,5 +1,4 @@
 #!/bin/bash
-set -euo pipefail
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
@@ -102,16 +101,8 @@ add_menu_numbers() {
     awk '{printf "%d. %s\n", NR, $0}'
 }
 
-strip_menu_number() {
-    sed 's/^[0-9]*\. //'
-}
-
 add_list_numbers() {
     awk '{printf "%d. |%s\n", NR, $0}'
-}
-
-strip_list_number() {
-    sed 's/^[0-9]*\. |//'
 }
 
 FZF_OPTS=(
@@ -193,7 +184,7 @@ hash_url() {
 is_cache_fresh() {
     local file="$1" max_age="$2" now mtime
 
-    now=$(date +%s)
+    printf -v now '%(%s)T' -1
 
     if mtime=$(stat -c %Y "$file" 2>/dev/null); then
         :
@@ -272,7 +263,8 @@ record_history() {
         return 1
     fi
 
-    printf '%s|%s|%s|%s\n' "$(date +%s)" "$safe_title" "$slug" "$safe_url" >> "$tmp"
+    printf -v now '%(%s)T' -1
+    printf '%s|%s|%s|%s\n' "$now" "$safe_title" "$slug" "$safe_url" >> "$tmp"
     mv "$tmp" "$HIST"
 }
 
@@ -296,7 +288,7 @@ add_favorite() {
     safe_title=$(sanitize_field "$title")
     safe_year=$(sanitize_field "$year")
     safe_poster=$(sanitize_field "$poster")
-    local timestamp=$(date +%s)
+    printf -v timestamp '%(%s)T' -1
 
     tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
 
@@ -336,8 +328,9 @@ download_episode() {
         return 1
     fi
 
-    file=$(sed 's/[[:space:]]\+/_/g; s/[^[:alnum:]_.-]//g' <<< "$title").mp4
-    [[ -z "$file" || "$file" == ".mp4" ]] && file="sudachi_$(date +%s).mp4"
+    file="${title//[[:space:]]/_}"
+    file="${file//[!a-zA-Z0-9_.-]/}.mp4"
+    [[ "$file" == ".mp4" ]] && printf -v file 'sudachi_%(%s)T.mp4' -1
 
     if command -v aria2c >/dev/null 2>&1; then
         yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 >/dev/null 2>&1 &
@@ -509,10 +502,7 @@ animapper_pick_provider() {
 
     log_debug "animapper_pick_provider: available providers: $provider_list"
 
-    local provider_count
-    provider_count=$(wc -l <<< "$provider_list")
-
-    if [[ "$provider_count" -eq 1 ]]; then
+    if [[ "$(jq -r 'keys | length' <<< "$providers_json" 2>/dev/null)" -eq 1 ]]; then
         log_debug "animapper_pick_provider: auto-selecting single provider: $provider_list"
         echo "$provider_list"
         return 0
@@ -525,7 +515,7 @@ animapper_pick_provider() {
         --prompt="PROVIDER > " --header="$header_text" --height=40%)
     [[ -z "$selected" ]] && return 1
 
-    strip_menu_number <<< "$selected"
+    echo "${selected#*. }"
 }
 
 animapper_get_episodes() {
@@ -650,8 +640,9 @@ $page_episodes"
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f <<< "$ds_tap")
 
-        local phim=$(head -1 <<< "$chon")
-        local data=$(tail -n +2 <<< "$chon")
+        local phim data
+        IFS= read -r phim <<< "$chon"
+        [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
         [[ -z "$data" ]] && break
 
     local tap="${data%%|*}"
@@ -718,7 +709,7 @@ play_animapper_hls() {
     local stream_url="$1" title="$2" proxy_headers="$3"
 
     local cache_key real_m3u8_url extra_headers=()
-    cache_key=$(basename "$stream_url")
+    cache_key="${stream_url##*/}"
     real_m3u8_url="${API_ANIMAPPER}/stream/source/m3u8/${cache_key}"
 
     if [[ "$proxy_headers" != "{}" && -n "$proxy_headers" ]]; then
@@ -776,22 +767,34 @@ EOF
 }
 
 
-# Prompt user to pick a server when multiple are available.
-# Arguments: JSON response, jq path to the episodes array.
-# Outputs: server index (0-based) to stdout. Returns 1 on cancel.
 pick_server() {
     local res="$1" episodes_path="$2"
-    local count idx=0
+    local idx=0
 
-    count=$(jq "${episodes_path} | length" <<< "$res" 2>/dev/null)
+    local parsed name_list
+    parsed=$(jq -r '
+        ['${episodes_path}'[] | .server_name] as $names
+        | ($names | length) as $count
+        | $count as $count
+        | "COUNT=\($count)", $names[]
+    ' <<< "$res" 2>/dev/null) || return 1
+
+    local count
+    IFS= read -r count <<< "$parsed"
+    count="${count#COUNT=}"
+
     if [[ "${count:-0}" -gt 1 ]]; then
-        local list name
-        list=$(jq -r "${episodes_path}[] | .server_name" <<< "$res" 2>/dev/null)
-        name=$(add_menu_numbers <<< "$list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+        name_list="${parsed#*$'\n'}"
+        local name
+        name=$(add_menu_numbers <<< "$name_list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
         [[ -z "$name" ]] && return 1
-        name=$(strip_menu_number <<< "$name")
-        idx=$(jq -r --arg sn "$name" "[${episodes_path}[].server_name] | to_entries[] | select(.value==\$sn) | .key" <<< "$res" 2>/dev/null | head -1)
-        [[ -z "$idx" ]] && idx=0
+        name="${name#*. }"
+
+        idx=0
+        while IFS= read -r sn; do
+            [[ "$sn" == "$name" ]] && { printf '%s\n' "$idx"; return; }
+            ((idx++))
+        done <<< "$name_list"
     fi
 
     printf '%s\n' "$idx"
@@ -845,8 +848,9 @@ watch_episode() {
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f <<< "$ds_tap")
 
-        local phim=$(head -1 <<< "$chon")
-        local data=$(tail -n +2 <<< "$chon")
+        local phim data
+        IFS= read -r phim <<< "$chon"
+        [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
         [[ -z "$data" ]] && break
 
     local tap="${data%%|*}"
@@ -886,7 +890,9 @@ show_list() {
     rm -f "$preview"
 
     if [[ -n "$chon" ]]; then
-        watch_episode "$(cut -d'|' -f5 <<< "$chon")" "$(strip_menu_number <<< "${chon%%|*}")"
+        local arr=()
+        IFS='|' read -ra arr <<< "$chon"
+        watch_episode "${arr[4]}" "${arr[0]#*. }"
     fi
 }
 
@@ -917,8 +923,9 @@ show_paginated_list() {
             --prompt="$prompt > " \
             --expect=right,left,enter)
 
-        local key=$(head -1 <<< "$output")
-        local chon=$(tail -n +2 <<< "$output")
+        local key chon
+        IFS= read -r key <<< "$output"
+        [[ "$output" == *$'\n'* ]] && chon="${output#*$'\n'}"
 
         case "$key" in
             right)
@@ -932,7 +939,9 @@ show_paginated_list() {
             enter|"")
                 if [[ -n "$chon" ]]; then
                     rm -f "$preview"
-                    watch_episode "$(cut -d'|' -f5 <<< "$chon")" "$(strip_menu_number <<< "${chon%%|*}")"
+                    local arr=()
+                    IFS='|' read -ra arr <<< "$chon"
+                    watch_episode "${arr[4]}" "${arr[0]#*. }"
                     return
                 else
                     rm -f "$preview"
@@ -1033,7 +1042,11 @@ search() {
         --preview="$preview {}" --preview-window=right:45%:wrap)
 
     rm -f "$search" "$preview"
-    [[ -n "$chon" ]] && watch_episode "$(cut -d'|' -f5 <<< "$chon")" "$(strip_menu_number <<< "${chon%%|*}")"
+    if [[ -n "$chon" ]]; then
+        local arr=()
+        IFS='|' read -ra arr <<< "$chon"
+        watch_episode "${arr[4]}" "${arr[0]#*. }"
+    fi
 }
 
 search_animapper() {
@@ -1050,10 +1063,9 @@ search_animapper() {
     rm -f "$search_script" "$preview"
 
     if [[ -n "$chon" ]]; then
-        local media_id title
-        media_id=$(cut -d'|' -f5 <<< "$chon")
-        title=$(strip_menu_number <<< "${chon%%|*}")
-        watch_episode_animapper "$media_id" "$title"
+        local arr=()
+        IFS='|' read -ra arr <<< "$chon"
+        watch_episode_animapper "${arr[4]}" "${arr[0]#*. }"
     fi
 }
 
@@ -1221,12 +1233,16 @@ Philippines|philippines"
 
 filter_by_year() {
     local nam_hien_tai=${CURRENT_YEAR:-$(date +%Y)}
-    local ds=$(printf "%s\n" $(seq "$nam_hien_tai" -1 2000))
+    local ds="" y
+    for ((y = nam_hien_tai; y >= 2000; y--)); do
+        ds+="$y"$'\n'
+    done
+    ds="${ds%$'\n'}"
 
     local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
     [[ -z "$chon" ]] && return
 
-    local nam_chon=$(strip_menu_number <<< "$chon")
+    local nam_chon="${chon#*. }"
 
 
     fetch_year() {
@@ -1285,7 +1301,7 @@ history() {
 
     local chon=$(sort -rn "$HIST" | add_list_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1,3 --prompt="LỊCH SỬ > ")
     [[ -z "$chon" ]] && return
-    chon=$(strip_list_number <<< "$chon")
+    chon="${chon#*| }"
     IFS='|' read -r _ slug _ url _ <<< "$chon"
     play_video "$url" "$slug"
 }
@@ -1302,7 +1318,7 @@ favorites() {
         } else if (NF >= 5) {
             print
         }
-    }' "$FAV" | sort -t'|' -k1,1rn | cut -d'|' -f2-)
+    }' "$FAV" | sort -t'|' -k1,1rn | awk '{ sub(/^[^|]*[|]/, ""); print }')
 
     [[ -z "$parsed_favs" ]] && { show_error "Chưa có yêu thích"; return; }
 
@@ -1310,8 +1326,9 @@ favorites() {
         --prompt="YÊU THÍCH > " --expect=enter,ctrl-d \
         --preview="echo 'Enter: Xem | Ctrl-D: Xóa'" --preview-window=top:2:wrap <<< "$parsed_favs")
 
-    local phim=$(head -1 <<< "$chon")
-    local data=$(tail -n +2 <<< "$chon")
+    local phim data
+    IFS= read -r phim <<< "$chon"
+    [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
     [[ -z "$data" ]] && return
 
     local slug="${data#*|}"
@@ -1419,8 +1436,11 @@ select_quality() {
 }
 
 clear_cache() {
-    local count
-    count=$(find "$CACHE" -name '*.json' | wc -l)
+    local json_files=("$CACHE"/*.json)
+    local count=0
+    for f in "${json_files[@]}"; do
+        [[ -f "$f" ]] && ((count++))
+    done
     rm -f "$CACHE"/*.json
     log_debug "Cache cleared manually: $count files removed"
     echo -e "${C_G}  Đã xóa ${count} file cache.${C_R}"
@@ -1448,7 +1468,7 @@ Xóa Cache ${I_CACHE}|cache"
 }
 
 show_banner() {
-    clear
+    printf '\033[H\033[2J'
     local nguon_text player_text quality_text
     case "$API_SOURCE" in
         nguonc)    nguon_text="Nguonc" ;;
