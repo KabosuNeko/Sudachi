@@ -633,14 +633,22 @@ $page_episodes"
 
     log_debug "watch_episode_animapper: total=$total_episodes, last_ep=$last_ep"
 
+    local chon=""
+    local phim=""
+    local data=""
+
     while true; do
-        local chon=$(fzf "${FZF_OPTS[@]}" \
+        chon=""
+        phim=""
+        data=""
+
+        chon=$(fzf "${FZF_OPTS[@]}" \
             --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f <<< "$ds_tap")
+        [[ -z "$chon" ]] && break
 
-        local phim data
         IFS= read -r phim <<< "$chon"
         [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
         [[ -z "$data" ]] && break
@@ -841,14 +849,22 @@ watch_episode() {
     local continue_header=""
     [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
 
+    local chon=""
+    local phim=""
+    local data=""
+
     while true; do
-        local chon=$(fzf "${FZF_OPTS[@]}" \
+        chon=""
+        phim=""
+        data=""
+
+        chon=$(fzf "${FZF_OPTS[@]}" \
             --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
             --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
             --preview-window=top:3:wrap --expect=enter,tab,ctrl-f <<< "$ds_tap")
+        [[ -z "$chon" ]] && break
 
-        local phim data
         IFS= read -r phim <<< "$chon"
         [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
         [[ -z "$data" ]] && break
