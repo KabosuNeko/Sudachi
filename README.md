@@ -71,8 +71,6 @@ Tự động tạo tại `~/.config/sudachi/`:
 |--------|----------|
 | [PhimAPI](https://phimapi.com) | `https://phimapi.com` |
 | [OPhim](https://ophim.cc) | `https://ophim1.com` |
-| [NguonC](https://nguonc.com) | `https://phim.nguonc.com` |
-| [AniMapper](https://animapper.net) | `https://api.animapper.net/api/v1` |
 
 ## Credits
 

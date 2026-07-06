@@ -2,7 +2,7 @@
 
 ## What this is
 
-A single Bash script (`sudachi.sh`, ~1530 lines) — Vietnamese-subtitled movie/TV/anime player using `fzf` (UI) and `mpv`/`vlc` (playback).
+A single Bash script (`sudachi.sh`, ~1096 lines) — Vietnamese-subtitled movie/TV/anime player using `fzf` (UI) and `mpv`/`vlc` (playback).
 
 ## Running
 
@@ -31,7 +31,7 @@ No arguments, no env vars, no build step. Validate syntax only: `bash -n sudachi
 
 Auto-created at `~/.config/sudachi/`:
 - `config` — `PLAYER_DEFAULT` (mpv/vlc) + `QUALITY` (1080/720/480/auto)
-- `source.conf` — single line: the API source name (validated against ophim1/phimapi/nguonc/animapper)
+- `source.conf` — single line: the API source name (validated against ophim1/phimapi)
 - `history.log`, `favorites.log`, `progress.log` — pipe-delimited records
 - `cache/` — JSON cache per URL hash (3600s TTL)
 - `cache/debug.log` — debug output (appended, never rotated)
@@ -44,16 +44,12 @@ Source selected at `~/.config/sudachi/source.conf`. **Default: `phimapi`** (hard
 |------|----------|----------------|----------------------|
 | `ophim1` | `https://ophim1.com` | `.data.items[]` | `/v1/api/...` |
 | `phimapi` | `https://phimapi.com` | `.data.items[]` | `/v1/api/...` |
-| `nguonc` | `https://phim.nguonc.com` | `items[]` | `/api/film/...` |
-| `animapper` | `https://api.animapper.net/api/v1` | Completely separate API | `/search`, `/metadata`, `/stream/...` |
 
 ### Critical: phimAPI/ophim1 merge
 
 Both share `/v1/api/...` paths and `.data.items[]` in most endpoints. **However**:
 - `*)` fallback in `get_base_url()` — any unrecognized source name silently falls to ophim1.
-- `nguonc` uses `/api/film/` paths and `items[]` (bare array).
-- Response parsers must match: `parse_phimapi_v3` (items[]), `parse_v1_items` (data.items[]), `parse_nguonc` (items[]).
-- AniMapper: completely separate code paths — `watch_episode_animapper`, `search_animapper`, `animapper_pick_provider`, `play_animapper_hls`. Own pagination (offset-based, 100/page), provider selection (fansub groups), HLS proxy resolution.
+- Response parsers must match: `parse_phimapi_v3` (items[]), `parse_v1_items` (data.items[]).
 
 **Rule**: verify JSON path for every source. Do not assume matching response structures even when `call_api` is shared.
 
@@ -66,9 +62,8 @@ Both share `/v1/api/...` paths and `.data.items[]` in most endpoints. **However*
 
 ## Menu structure
 
-Main menu (`main_menu()`) adapts based on `API_SOURCE`:
-- **All sources**: Tìm Kiếm, Lịch Sử, Yêu Thích, Cài Đặt, Thoát
-- **Non-animapper**: Phim Mới, Duyệt Phim, Anime, Lọc Nâng Cao (extra items)
+Main menu (`main_menu()`) always shows all items regardless of `API_SOURCE`:
+- Tìm Kiếm, Phim Mới, Duyệt Phim, Anime, Lọc Nâng Cao, Lịch Sử, Yêu Thích, Cài Đặt, Thoát
 - All labels are Vietnamese — `case` in the main loop matches by full text
 
 ## Architecture notes
