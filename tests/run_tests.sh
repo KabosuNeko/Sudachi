@@ -414,8 +414,9 @@ EOF
     # (ffmpeg refuses https segments with the default file,crypto,data list).
     assert_contains "$(cat "$argsfile")" "--demuxer-lavf-format=hls" "mpv forces hls demuxer" || return 1
     assert_contains "$(cat "$argsfile")" 'protocol_whitelist="https,http,file,tcp,tls,crypto,data"' "mpv widens segment protocol whitelist" || return 1
-    # PTS jumps where ad segments were removed; linearize or seek resets.
-    assert_contains "$(cat "$argsfile")" "--demuxer-lavf-linearize-timestamps=yes" "mpv linearizes timestamps" || return 1
+    # --demuxer-lavf-linearize-timestamps=yes is deliberately absent: it
+    # rewrites the timeline one-way and breaks backward seek across the
+    # PTS jumps left by removed ad segments.
 }
 
 test_play_video_fallback_url() {
