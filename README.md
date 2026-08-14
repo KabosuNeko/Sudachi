@@ -77,8 +77,9 @@ Tự động tạo tại `~/.config/sudachi/`:
 Khi phát phim từ phimapi, các khối quảng cáo bị chèn giữa tập sẽ được **lọc tự động trước khi phát** — hết ad giữa phim, và tua tới/tua lui hoạt động bình thường.
 
 Cách hoạt động:
-- Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7`)
+- Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7` cùng các biến thể `ads*/`, `promo*/`)
 - Bản đã lọc được cache tại `~/.config/sudachi/cache/<hash>-clean.m3u8`
+- **Tự phát hiện CDN đổi layout ad**: nếu playlist có dấu hiệu quảng cáo (DISCONTINUITY) nhưng không khớp pattern nào, chương trình ghi cảnh báo vào `cache/debug.log` để bạn biết cần cập nhật pattern
 - Nếu có bất kỳ lỗi nào khi lọc, chương trình **tự phát stream gốc** — xem phim không bao giờ bị gián đoạn
 - **Tải phim (Tab) giữ nguyên stream gốc** (có ad) — chỉ lọc khi phát
 

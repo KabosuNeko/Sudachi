@@ -159,6 +159,10 @@ test_hls_strip_ads() {
     out=$(hls_strip_ads "$base" < "$ad_fix")
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "no convertv8 ad lines" || return 1
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "no /v8/ ad lines" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "no convertv7 ad lines" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "no /v7/ ad lines" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "no ads9/ ad lines (semantic pattern)" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "no promo7/ ad lines (semantic pattern)" || return 1
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" "no stray discontinuity (ad closing brackets dropped)" || return 1
     assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept" || return 1
     assert_contains "$out" "#EXTM3U" "header kept" || return 1
@@ -367,6 +371,35 @@ EOF
     assert_eq 0 "$rc" "fallback returns 0" || return 1
 }
 
+test_hls_fetch_clean_canary() {
+    # A playlist with DISCONTINUITY but no ad-pattern match must trigger the
+    # canary debug log (CDN may have changed its ad URI layout).
+    local curlbin="$TEST_HOME/curlbin-hls-canary"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+url="\${@: -1}"
+case "\$url" in
+    *master*)
+        cat <<'MASTER'
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080
+/20260807/Dcq1MBiO/3500kb/hls/index.m3u8
+MASTER
+        ;;
+    *)
+        cat "$SCRIPT_DIR/fixtures/disc_no_ad_playlist.m3u8"
+        ;;
+esac
+EOF
+    chmod +x "$curlbin/curl"
+
+    local url="https://cdn.example/master.m3u8"
+    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
+    assert_contains "$(cat "$CACHE/debug.log" 2>/dev/null)" "HLS_AD_PATTERNS may need updating" "canary flags unmatched ad layout" || return 1
+}
+
 test_play_video_cleans_url() {
     # Fake mpv records its args; fake curl serves master->variant->media
     # fixture. Assert mpv receives the cleaned playlist and --cache=yes.
@@ -527,6 +560,7 @@ TESTS=(
     hls_strip_ads
     hls_fetch_clean_ok
     hls_fetch_clean_fallback
+    hls_fetch_clean_canary
     play_video_cleans_url
     play_video_fallback_url
     is_cache_fresh

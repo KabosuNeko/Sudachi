@@ -182,9 +182,11 @@ hash_url() {
 
 # HLS_AD_PATTERNS -- awk ERE alternation matching known ad-segment URIs in HLS
 # playlists. Observed on phimapi CDNs: kkphimplayer7 (convertv8/, /v8/...)
-# and kkphimplayer6 (convertv7/, /v7/...). Extendable: append new patterns
-# separated by '|'.
-HLS_AD_PATTERNS='convertv[0-9]+/|^/v[0-9]+/[0-9a-f]+/segment_'
+# and kkphimplayer6 (convertv7/, /v7/...). Ads always live in a subdirectory
+# or root-relative path, never flat like movie segments -- so the semantic
+# alternatives (ads*, promo*) are safe to match. Extendable: append new
+# patterns separated by '|'.
+HLS_AD_PATTERNS='convertv[0-9]+/|ads?[0-9]*/|promo[0-9]*/|^/v[0-9]+/[0-9a-f]+/segment_'
 
 # hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
 # Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
@@ -297,6 +299,13 @@ hls_fetch_clean() {
         echo "$url"
         return 0
     }
+    # Canary: many DISCONTINUITY tags but zero ad-pattern matches means the
+    # CDN likely changed its ad URI layout -- flag it so HLS_AD_PATTERNS can
+    # be updated before users just accept the ads returning.
+    if [ "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" -ge 2 ] && \
+       ! printf '%s\n' "$out" | grep -qE "$HLS_AD_PATTERNS"; then
+        log_debug "hls_fetch_clean: $media has DISCONTINUITY but no ad-pattern match — HLS_AD_PATTERNS may need updating"
+    fi
     hash=$(hash_url "$url")
     tmp="$CACHE/.tmp-$$.m3u8"
     if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
