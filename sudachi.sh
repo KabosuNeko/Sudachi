@@ -517,6 +517,11 @@ play_video() {
                 if [[ "$url" == /* ]]; then
                     mpv_args+=("--demuxer-lavf-format=hls")
                     mpv_args+=('--demuxer-lavf-o=protocol_whitelist="https,http,file,tcp,tls,crypto,data"')
+                    # Ad segments are removed from the playlist, so the PTS
+                    # timeline jumps where the ad used to be. Linearize the
+                    # timestamps or mpv loses audio sync / resets to the start
+                    # when seeking across those points.
+                    mpv_args+=("--demuxer-lavf-linearize-timestamps=yes")
                 fi
             fi
             if [[ -n "$QUALITY" ]]; then
