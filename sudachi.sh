@@ -181,8 +181,10 @@ hash_url() {
 }
 
 # HLS_AD_PATTERNS -- awk ERE alternation matching known ad-segment URIs in HLS
-# playlists. Extendable: append new patterns separated by '|'.
-HLS_AD_PATTERNS='convertv8/|^/v8/[0-9a-f]+/segment_'
+# playlists. Observed on phimapi CDNs: kkphimplayer7 (convertv8/, /v8/...)
+# and kkphimplayer6 (convertv7/, /v7/...). Extendable: append new patterns
+# separated by '|'.
+HLS_AD_PATTERNS='convertv[0-9]+/|^/v[0-9]+/[0-9a-f]+/segment_'
 
 # hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
 # Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
