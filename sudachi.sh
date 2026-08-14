@@ -499,7 +499,17 @@ play_video() {
             local mpv_args=("$url" "--title=$title" "--force-window" "${extra_args[@]}")
             # Seekable demuxer cache for HLS: enables smooth seek on the
             # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
-            [[ "$url" == *".m3u8"* ]] && mpv_args+=("--cache=yes")
+            if [[ "$url" == *".m3u8"* ]]; then
+                mpv_args+=("--cache=yes")
+                # Local cleaned playlist: ffmpeg hls demuxer restricts segment
+                # protocols to file,crypto,data by default and refuses https
+                # segments, stalling playback every few seconds. Force hls and
+                # whitelist the segment protocols (mpv#14792).
+                if [[ "$url" == /* ]]; then
+                    mpv_args+=("--demuxer-lavf-format=hls")
+                    mpv_args+=('--demuxer-lavf-o=protocol_whitelist="https,http,file,tcp,tls,crypto,data"')
+                fi
+            fi
             if [[ -n "$QUALITY" ]]; then
                 mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
             fi

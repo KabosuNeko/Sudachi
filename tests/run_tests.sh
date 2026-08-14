@@ -409,6 +409,10 @@ EOF
     first=$(head -1 "$argsfile")
     assert_contains "$first" "-clean.m3u8" "mpv receives clean playlist" || return 1
     assert_contains "$(cat "$argsfile")" "--cache=yes" "mpv gets --cache=yes" || return 1
+    # Local cleaned playlist needs the hls demuxer + widened protocol whitelist
+    # (ffmpeg refuses https segments with the default file,crypto,data list).
+    assert_contains "$(cat "$argsfile")" "--demuxer-lavf-format=hls" "mpv forces hls demuxer" || return 1
+    assert_contains "$(cat "$argsfile")" 'protocol_whitelist="https,http,file,tcp,tls,crypto,data"' "mpv widens segment protocol whitelist" || return 1
 }
 
 test_play_video_fallback_url() {
