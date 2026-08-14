@@ -1,4 +1,5 @@
 #!/bin/bash
+# noqa: SIZE_OK — single-file architecture required by README curl one-liner install
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
@@ -179,18 +180,135 @@ hash_url() {
     printf '%s' "$input" | cksum | cut -d' ' -f1
 }
 
+# HLS_AD_PATTERNS -- awk ERE alternation matching known ad-segment URIs in HLS
+# playlists. Extendable: append new patterns separated by '|'.
+HLS_AD_PATTERNS='convertv8/|^/v8/[0-9a-f]+/segment_'
+
+# hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
+# Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
+# with scheme://host of base, relative uris joined to the base directory, and
+# an empty string for an empty uri.
+hls_absolutize_url() {
+    local base="$1" uri="$2" scheme rest host dir
+
+    if [[ -z "$uri" ]]; then
+        printf '%s' ''
+        return
+    fi
+
+    case "$uri" in
+        http://*|https://*)
+            printf '%s' "$uri"
+            ;;
+        /*)
+            scheme="${base%%://*}"
+            rest="${base#*://}"
+            host="${rest%%/*}"
+            printf '%s://%s%s' "$scheme" "$host" "$uri"
+            ;;
+        *)
+            scheme="${base%%://*}"
+            rest="${base#*://}"
+            dir="${rest%/*}"
+            printf '%s://%s/%s' "$scheme" "$dir" "$uri"
+            ;;
+    esac
+}
+
+# hls_strip_ads <base> -- read a media playlist on stdin, write the filtered
+# playlist to stdout. awk accumulates pending tag lines (EXT-X-DISCONTINUITY,
+# EXT-X-KEY:METHOD=NONE, EXTINF); when the following segment URI matches
+# HLS_AD_PATTERNS the pending tags and the URI are dropped (ad block removed),
+# otherwise pending tags are flushed and the URI is absolutized via
+# hls_absolutize_url. All other lines pass through verbatim.
+hls_strip_ads() {
+    local base="$1"
+
+    awk -v adpat="$HLS_AD_PATTERNS" '
+        {
+            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/ || $0 ~ /^#EXTINF/) {
+                pend[n++] = $0
+                next
+            }
+            if ($0 !~ /^#/ && $0 != "") {
+                if ($0 ~ adpat) {
+                    n = 0
+                    next
+                }
+                for (i = 0; i < n; i++) print pend[i]
+                n = 0
+                print
+                next
+            }
+            for (i = 0; i < n; i++) print pend[i]
+            n = 0
+            print
+        }
+        END {
+            for (i = 0; i < n; i++) print pend[i]
+        }
+    ' | while IFS= read -r line; do
+        if [[ "$line" != '#'* ]] && [[ -n "$line" ]]; then
+            printf '%s\n' "$(hls_absolutize_url "$base" "$line")"
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+}
+
+# hls_fetch_clean <url> -- fetch an HLS playlist (master or media), strip ad
+# segments via hls_strip_ads, absolutize segment URIs, cache the result as
+# $CACHE/<hash>-clean.m3u8 and echo its local path. If the fetched playlist is
+# a master (contains #EXT-X-STREAM-INF) the first variant playlist is fetched
+# instead. On ANY failure echoes the original url unchanged and returns 0
+# (silent fallback: playback must never break).
+hls_fetch_clean() {
+    local url="$1" master variant media out tmp hash
+    master=$(curl -fsS --connect-timeout 10 --max-time 10 "$url" 2>/dev/null) || {
+        echo "$url"
+        return 0
+    }
+    if printf '%s' "$master" | grep -q '^#EXT-X-STREAM-INF'; then
+        variant=$(printf '%s\n' "$master" | awk '/^#EXT-X-STREAM-INF/{getline; print; exit}')
+        media=$(hls_absolutize_url "$url" "$variant")
+    else
+        media="$url"
+    fi
+    [[ -z "$media" ]] && {
+        echo "$url"
+        return 0
+    }
+    out=$(curl -fsS --connect-timeout 10 --max-time 10 "$media" 2>/dev/null) || {
+        echo "$url"
+        return 0
+    }
+    [[ -z "$out" ]] && {
+        echo "$url"
+        return 0
+    }
+    hash=$(hash_url "$url")
+    tmp="$CACHE/.tmp-$$.m3u8"
+    if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
+        if mv -f "$tmp" "$CACHE/$hash-clean.m3u8" 2>/dev/null; then
+            echo "$CACHE/$hash-clean.m3u8"
+        else
+            rm -f "$tmp"
+            echo "$url"
+            return 0
+        fi
+    else
+        rm -f "$tmp"
+        echo "$url"
+        return 0
+    fi
+}
+
 is_cache_fresh() {
     local file="$1" max_age="$2" now mtime
 
     printf -v now '%(%s)T' -1
 
-    if mtime=$(stat -c %Y "$file" 2>/dev/null); then
-        :
-    elif mtime=$(stat -f %m "$file" 2>/dev/null); then
-        :
-    else
-        return 1
-    fi
+    mtime=$(stat -c %Y "$file" 2>/dev/null) || mtime=$(stat -f %m "$file" 2>/dev/null) || return 1
 
     (( now - mtime < max_age ))
 }
@@ -338,8 +456,8 @@ download_episode() {
 }
 
 check_player() {
-    local has_mpv=0; hash mpv 2>/dev/null && has_mpv=1
-    local has_vlc=0; hash vlc 2>/dev/null && has_vlc=1
+    local has_mpv=0; command -v mpv &>/dev/null && has_mpv=1
+    local has_vlc=0; command -v vlc &>/dev/null && has_vlc=1
 
     if [[ -n "$PLAYER_DEFAULT" ]]; then
         if [[ "$PLAYER_DEFAULT" == "mpv" && $has_mpv -eq 1 ]] || \
@@ -365,6 +483,12 @@ play_video() {
     shift 2
     local extra_args=("$@")
 
+    # HLS streams: strip mid-roll ad segments via hls_fetch_clean (falls back
+    # to the original URL on any failure, so playback never breaks).
+    if [[ "$url" == *".m3u8"* ]]; then
+        url=$(hls_fetch_clean "$url")
+    fi
+
     case "$PLAYER_DEFAULT" in
         vlc)
             local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" "${extra_args[@]}")
@@ -373,6 +497,9 @@ play_video() {
             ;;
         *)
             local mpv_args=("$url" "--title=$title" "--force-window" "${extra_args[@]}")
+            # Seekable demuxer cache for HLS: enables smooth seek on the
+            # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
+            [[ "$url" == *".m3u8"* ]] && mpv_args+=("--cache=yes")
             if [[ -n "$QUALITY" ]]; then
                 mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
             fi
@@ -452,7 +579,6 @@ pick_server() {
     parsed=$(jq -r '
         ['${episodes_path}'[] | .server_name] as $names
         | ($names | length) as $count
-        | $count as $count
         | "COUNT=\($count)", $names[]
     ' <<< "$res" 2>/dev/null) || return 1
 
@@ -484,15 +610,11 @@ watch_episode() {
 
     local res ds_tap server_idx
 
-    case "$API_SOURCE" in
-        phimapi|*)
-            res=$(call_api "/phim/$slug")
-            [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
+    res=$(call_api "/phim/$slug")
+    [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
-            server_idx=$(pick_server "$res" '.episodes') || return
-            ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' <<< "$res" 2>/dev/null)
-            ;;
-    esac
+    server_idx=$(pick_server "$res" '.episodes') || return
+    ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' <<< "$res" 2>/dev/null)
 
     [[ -z "$ds_tap" ]] && { show_error "Không có tập phim"; return; }
 
@@ -608,16 +730,13 @@ show_paginated_list() {
                 continue
                 ;;
             enter|"")
+                rm -f "$preview"
                 if [[ -n "$chon" ]]; then
-                    rm -f "$preview"
                     local arr=()
                     IFS='|' read -ra arr <<< "$chon"
                     watch_episode "${arr[4]}" "${arr[0]#*. }"
-                    return
-                else
-                    rm -f "$preview"
-                    return
                 fi
+                return
                 ;;
         esac
     done
@@ -626,14 +745,10 @@ show_paginated_list() {
 
 fetch_list() {
     local loai="$1" p="$2" res cdn
-    case "$API_SOURCE" in
-        phimapi|*)
-            res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
-            [[ -z "$res" ]] && return
-            cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
-            parse_v1_items "$res" "$cdn"
-            ;;
-    esac
+    res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+    [[ -z "$res" ]] && return
+    cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
+    parse_v1_items "$res" "$cdn"
 }
 
 create_search_script() {
@@ -647,19 +762,13 @@ q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
 source="$API_SOURCE"
 
 case "\$source" in
-    phimapi)
-        res=\$(curl -fsS --max-time 5 "${API_PHIMAPI}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
-        [[ -z "\$res" ]] && exit 0
-        cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-        echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
-        ;;
-    *)
-        res=\$(curl -fsS --max-time 5 "${API_OPHIM1}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
-        [[ -z "\$res" ]] && exit 0
-        cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-        echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
-        ;;
+    phimapi) base="${API_PHIMAPI}" ;;
+    *)       base="${API_OPHIM1}" ;;
 esac
+res=\$(curl -fsS --max-time 5 "\${base}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
+[[ -z "\$res" ]] && exit 0
+cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
+echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
 EOF
     chmod +x "$script"
     echo "$script"
@@ -700,9 +809,7 @@ new_releases() {
             res=$(call_api "/v1/api/danh-sach/phim-moi-cap-nhat-v3?page=1")
             [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
             cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
-            show_list "$(jq -r --arg cdn "$cdn" '.data.items[] |
-                (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
-                "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' <<< "$res" 2>/dev/null)" "PHIM MỚI"
+            show_list "$(parse_v1_items "$res" "$cdn")" "PHIM MỚI"
             ;;
     esac
 }
@@ -748,13 +855,9 @@ filter_by_genre() {
     show_loading
     local res ds
 
-    case "$API_SOURCE" in
-        phimapi|*)
-            res=$(call_api "/the-loai")
-            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
-            ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
-            ;;
-    esac
+    res=$(call_api "/the-loai")
+    [[ -z "$res" ]] && { show_error "Lỗi"; return; }
+    ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
 
     local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="THỂ LOẠI > ")
     [[ -z "$chon" ]] && return
@@ -774,13 +877,9 @@ filter_by_country() {
     show_loading
     local res ds
 
-    case "$API_SOURCE" in
-        phimapi|*)
-            res=$(call_api "/quoc-gia")
-            [[ -z "$res" ]] && { show_error "Lỗi"; return; }
-            ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
-            ;;
-    esac
+    res=$(call_api "/quoc-gia")
+    [[ -z "$res" ]] && { show_error "Lỗi"; return; }
+    ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
 
     local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="QUỐC GIA > ")
     [[ -z "$chon" ]] && return
@@ -811,16 +910,7 @@ filter_by_year() {
 
 
     fetch_year() {
-        local p="$1"
-        case "$API_SOURCE" in
-            phimapi|*)
-                local res cdn
-                res=$(call_api "/v1/api/nam/${nam_chon}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
-                [[ -z "$res" ]] && return
-                cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
-                parse_v1_items "$res" "$cdn"
-                ;;
-        esac
+        fetch_list "nam/${nam_chon}" "$1"
     }
 
     show_paginated_list "Năm $nam_chon" fetch_year
@@ -830,15 +920,11 @@ anime_mode() {
 
     fetch_anime() {
         local p="$1"
-        case "$API_SOURCE" in
-            phimapi|*)
-                local res cdn
-                res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
-                [[ -z "$res" ]] && return
-                cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
-                parse_v1_items "$res" "$cdn"
-                ;;
-        esac
+        local res cdn
+        res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
+        [[ -z "$res" ]] && return
+        cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
+        parse_v1_items "$res" "$cdn"
     }
 
     show_paginated_list "Anime" fetch_anime
@@ -877,10 +963,7 @@ favorites() {
     # Old favorites lacked a poster field (4 fields). Skip them silently.
     # Current format has 5 fields: timestamp|title|slug|year|poster.
     parsed_favs=$(awk -F'|' '{
-        if (NF == 4) {
-        } else if (NF >= 5) {
-            print
-        }
+        if (NF >= 5) print
     }' "$FAV" | sort -t'|' -k1,1rn | awk '{ sub(/^[^|]*[|]/, ""); print }')
 
     [[ -z "$parsed_favs" ]] && { show_error "Chưa có yêu thích"; return; }

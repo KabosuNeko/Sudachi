@@ -68,7 +68,7 @@ Main menu (`main_menu()`) always shows all items regardless of `API_SOURCE`:
 
 ## Architecture notes
 
-- **`set -euo pipefail`** active at line 2. Guard commands that may return non-zero (e.g., bare `command -v`).
+- **No `set -euo pipefail`** — the script runs without strict mode. Guards that check `command -v` or use `&&`/`||` are behavioral, not defensive.
 - **FZF_OPTS** global array at line 117 — all fzf calls reuse it.
 - **Cache**: URL → MD5 hash → JSON file. Fresh for 3600s. Cleared on source switch or manually (`Cài Đặt → Xóa Cache` — only removes `*.json`).
 - **Temp scripts**: `create_preview_script` / `create_search_script` write standalone shell scripts under `$CACHE/`. Cleaned on exit via `trap cleanup EXIT SIGINT SIGTERM`. **URLs must be baked at creation time** — subprocesses have no access to parent shell variables.
@@ -76,5 +76,6 @@ Main menu (`main_menu()`) always shows all items regardless of `API_SOURCE`:
 - **`sanitize_field`** (line 209) normalizes newlines, trims, replaces `|` — used for display fields in pipe-delimited records.
 - **`log_debug`** appends to `$CACHE/debug.log` (never rotated).
 - **`hash_url`** prefers `md5sum`, falls back to `md5`, `sha256sum`, `cksum`.
+- **HLS ad-stripping** at `play_video()`: `.m3u8` URLs pass through `hls_fetch_clean` before playback — mid-roll ad segments (patterns in the `HLS_AD_PATTERNS` awk ERE variable, extendable) are dropped from the media playlist; the cleaned playlist is cached as `<hash>-clean.m3u8` in `cache/`; any fetch/filter failure falls back to the raw URL (playback never breaks). mpv gets `--cache=yes` for HLS (never `--force-seekable=yes` — breaks HLS, mpv#11990). Downloads keep the raw stream.
 - **All UI text is Vietnamese** (labels, error messages, comments). English only in code comments.
 - **Single branch (`main`)**, single contributor. No tests, no CI, no formatter.
