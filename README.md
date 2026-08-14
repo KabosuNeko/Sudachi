@@ -72,6 +72,16 @@ Tự động tạo tại `~/.config/sudachi/`:
 | [PhimAPI](https://phimapi.com) | `https://phimapi.com` |
 | [OPhim](https://ophim.cc) | `https://ophim1.com` |
 
+## Chặn quảng cáo giữa tập (phimapi)
+
+Khi phát phim từ phimapi, các khối quảng cáo bị chèn giữa tập sẽ được **lọc tự động trước khi phát** — hết ad giữa phim, và tua tới/tua lui hoạt động bình thường.
+
+Cách hoạt động:
+- Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7`)
+- Bản đã lọc được cache tại `~/.config/sudachi/cache/<hash>-clean.m3u8`
+- Nếu có bất kỳ lỗi nào khi lọc, chương trình **tự phát stream gốc** — xem phim không bao giờ bị gián đoạn
+- **Tải phim (Tab) giữ nguyên stream gốc** (có ad) — chỉ lọc khi phát
+
 ## Credits
 
 UI: [fzf](https://github.com/junegunn/fzf)
