@@ -159,6 +159,7 @@ test_hls_strip_ads() {
     out=$(hls_strip_ads "$base" < "$ad_fix")
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "no convertv8 ad lines" || return 1
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "no /v8/ ad lines" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" "no stray discontinuity (ad closing brackets dropped)" || return 1
     assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept" || return 1
     assert_contains "$out" "#EXTM3U" "header kept" || return 1
     assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_001.ts" "movie segment kept + absolutized" || return 1

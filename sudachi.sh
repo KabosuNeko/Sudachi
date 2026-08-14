@@ -220,21 +220,30 @@ hls_absolutize_url() {
 # EXT-X-KEY:METHOD=NONE, EXTINF); when the following segment URI matches
 # HLS_AD_PATTERNS the pending tags and the URI are dropped (ad block removed),
 # otherwise pending tags are flushed and the URI is absolutized via
-# hls_absolutize_url. All other lines pass through verbatim.
+# hls_absolutize_url. While inside a dropped ad block (indrop=1) further
+# DISCONTINUITY/KEY:NONE tags are dropped too (closing brackets of the ad
+# block) so the kept movie segments stay continuous. All other lines pass
+# through verbatim.
 hls_strip_ads() {
     local base="$1"
 
     awk -v adpat="$HLS_AD_PATTERNS" '
         {
-            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/ || $0 ~ /^#EXTINF/) {
+            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/) {
+                if (!indrop) pend[n++] = $0
+                next
+            }
+            if ($0 ~ /^#EXTINF/) {
                 pend[n++] = $0
                 next
             }
             if ($0 !~ /^#/ && $0 != "") {
                 if ($0 ~ adpat) {
                     n = 0
+                    indrop = 1
                     next
                 }
+                indrop = 0
                 for (i = 0; i < n; i++) print pend[i]
                 n = 0
                 print
