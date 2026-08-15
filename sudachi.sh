@@ -228,51 +228,89 @@ hls_absolutize_url() {
 }
 
 # hls_strip_ads <base> -- read a media playlist on stdin, write the filtered
-# playlist to stdout. Uses safe-filtering: only drops segments that are fully
-# inside an ad block (consecutive ad-pattern URIs). Boundary segments at the
-# edges of an ad block are KEPT to avoid cutting into movie content that may
-# share a segment with ad material. A single #EXT-X-DISCONTINUITY is emitted
-# at each splice point so the player resets its PTS timeline correctly.
+# playlist to stdout. Safe-filtering: keeps the FIRST and LAST segment of each
+# ad block (boundary segments may share frames with movie content — the API
+# appends a short movie piece to the ad tail) and only drops the pure ad
+# segments in between; a single #EXT-X-DISCONTINUITY is emitted at each splice
+# point so the player resets its PTS timeline correctly. Header normalization:
+# strips #EXT-X-DISCONTINUITY-SEQUENCE (its index shifts after ad removal and
+# poisons ffmpeg seek tables) and guarantees #EXT-X-PLAYLIST-TYPE:VOD.
+# Segments resolving into the playlist's own directory are movie content and
+# are never treated as ads, even when they match HLS_AD_PATTERNS.
 hls_strip_ads() {
-    local base="$1"
+    local base="$1" basedir basehost
+    basedir="${base%/*}"
+    basehost=$(printf '%s' "$base" | sed -E 's|^(https?://[^/]+).*|\1|')
 
-    awk -v adpat="$HLS_AD_PATTERNS" '
-        # Buffer pending tags (DISCONTINUITY, KEY:NONE, EXTINF) until we see
-        # the segment URI that tells us whether it is ad or movie.
+    awk -v adpat="$HLS_AD_PATTERNS" -v basedir="$basedir" -v basehost="$basehost" '
+        function seg_is_movie(u,   abs) {
+            if (u ~ /^https?:\/\//) abs = u
+            else if (u ~ /^\//) abs = basehost u
+            else abs = basedir "/" u
+            sub(/\/[^\/]*$/, "", abs)
+            return (abs == basedir)
+        }
+        function flush_block(   i) {
+            for (i = 0; i < ahead_n; i++) print ahead[i]
+            if (acount >= 2) {
+                print "#EXT-X-DISCONTINUITY"
+                print aextinf
+                print auri
+            }
+            ahead_n = 0
+            in_ad = 0
+            acount = 0
+            aextinf = ""
+            auri = ""
+            atags_n = 0
+            aextinf_tmp = ""
+        }
         {
+            if ($0 ~ /^#EXTM3U/) {
+                print
+                print "#EXT-X-PLAYLIST-TYPE:VOD"
+                next
+            }
+            if ($0 ~ /^#EXT-X-PLAYLIST-TYPE/) { next }
+            if ($0 ~ /^#EXT-X-DISCONTINUITY-SEQUENCE/) { next }
             if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/) {
-                if (!indrop) pend[n++] = $0
+                if (in_ad) { atags[atags_n++] = $0; next }
+                pend[n++] = $0
                 next
             }
             if ($0 ~ /^#EXTINF/) {
+                if (in_ad) { aextinf_tmp = $0; next }
                 pend[n++] = $0
                 next
             }
             # Segment URI line (non-comment, non-empty).
             if ($0 !~ /^#/ && $0 != "") {
-                if ($0 ~ adpat) {
-                    # This segment is an ad.
-                    if (!indrop) {
-                        # First ad after movie content — this is a boundary
-                        # segment that might contain movie frames at its start.
-                        # Safe-filter: keep it to avoid losing movie content.
-                        for (i = 0; i < n; i++) print pend[i]
+                if ($0 ~ adpat && !seg_is_movie($0)) {
+                    if (!in_ad) {
+                        # First segment of an ad block: snapshot the leading
+                        # tags + this URI as the entry boundary.
+                        in_ad = 1
+                        acount = 1
+                        for (i = 0; i < n; i++) ahead[ahead_n++] = pend[i]
+                        ahead[ahead_n++] = $0
                         n = 0
-                        print
-                        indrop = 1
                     } else {
-                        # Consecutive ad segment deep inside the ad block —
-                        # safe to drop.
-                        n = 0
+                        # Consecutive ad segment: remember it as the exit
+                        # boundary (interior tags are dropped).
+                        acount++
+                        aextinf = aextinf_tmp
+                        auri = $0
+                        aextinf_tmp = ""
+                        atags_n = 0
                     }
                     next
                 }
-                # This segment is movie content.
-                if (indrop) {
-                    # Exiting ad block. Emit DISCONTINUITY at splice point.
-                    print "#EXT-X-DISCONTINUITY"
+                # Movie segment: end of ad block (if any).
+                if (in_ad) {
+                    for (i = 0; i < atags_n; i++) pend[n++] = atags[i]
+                    if (aextinf_tmp != "") pend[n++] = aextinf_tmp
+                    flush_block()
                 }
-                indrop = 0
                 for (i = 0; i < n; i++) print pend[i]
                 n = 0
                 print
@@ -284,6 +322,10 @@ hls_strip_ads() {
             print
         }
         END {
+            if (in_ad) {
+                for (i = 0; i < atags_n; i++) pend[n++] = atags[i]
+                flush_block()
+            }
             for (i = 0; i < n; i++) print pend[i]
         }
     ' | while IFS= read -r line; do
@@ -548,6 +590,14 @@ play_video() {
             # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
             if [[ "$url" == *".m3u8"* ]]; then
                 mpv_args+=("--cache=yes")
+                # Seekable RAM cache: seeks that land inside the buffered
+                # range are served from memory instead of the ffmpeg demuxer,
+                # so PTS gaps left by ad removal can never reset playback to
+                # the start (0:00).
+                mpv_args+=("--demuxer-seekable-cache=yes")
+                mpv_args+=("--demuxer-max-bytes=150M")
+                mpv_args+=("--demuxer-max-back-bytes=100M")
+                mpv_args+=("--hr-seek=default")
                 # Prevent mpv from dropping frames or swallowing audio at
                 # DISCONTINUITY splice points left by ad removal. Without
                 # these, mpv drops 0.5-1s of movie content after each cut.

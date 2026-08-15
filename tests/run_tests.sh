@@ -157,28 +157,34 @@ test_hls_strip_ads() {
     local out
 
     out=$(hls_strip_ads "$base" < "$ad_fix")
-    # Safe-filter: the first ad segment (boundary) is KEPT; only interior
-    # consecutive ad segments are dropped.
-    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "boundary convertv8 kept (safe-filter)" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "interior /v8/ ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "interior convertv7 ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "interior /v7/ ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "interior ads9/ ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "interior promo7/ ad lines dropped" || return 1
-    # Expect 2 DISCONTINUITY: one from the original pend before boundary ad,
-    # one emitted at the splice point when exiting the ad block.
-    assert_eq 2 "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" "discontinuity at boundary entry and splice exit" || return 1
+    # Double-ended safe boundary: the FIRST and LAST segment of each ad block
+    # are kept (they may share frames with movie content — the API appends a
+    # short movie piece to the ad tail); only interior ad segments are dropped.
+    assert_eq 2 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "convertv8 block: 3 segs -> keep boundary 2" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv8/dQp9IHvN-1')" "convertv8 interior segment dropped" || return 1
+    assert_eq 2 "$(printf '%s\n' "$out" | grep -c '/v8/')" "/v8/ block: 3 segs -> keep boundary 2" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'segment_0002')" "/v8/ interior segment dropped" || return 1
+    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "convertv7 block: 1 seg -> kept" || return 1
+    assert_eq 1 "$(printf '%s\n' "$out" | grep -c '/v7/')" "/v7/ block: 1 seg -> kept" || return 1
+    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "ads9 block: 1 seg -> kept (semantic pattern)" || return 1
+    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "promo7 block: 1 seg -> kept (semantic pattern)" || return 1
+    # Header normalization: VOD injected, DISCONTINUITY-SEQUENCE stripped.
+    assert_contains "$out" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'DISCONTINUITY-SEQUENCE')" "DISCONTINUITY-SEQUENCE stripped" || return 1
     assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept" || return 1
     assert_contains "$out" "#EXTM3U" "header kept" || return 1
     assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_001.ts" "movie segment kept + absolutized" || return 1
+    assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_014.ts" "last movie segment kept" || return 1
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c '3500kb/hls/3500kb')" "no doubled path" || return 1
 
-    # Clean fixture: no ad patterns -> output must be byte-identical to input.
+    # Clean fixture: no ad patterns -> all movie segments preserved; VOD is
+    # injected so output is NOT byte-identical anymore.
     out=$(hls_strip_ads "$base" < "$clean_fix")
-    printf '%s\n' "$out" | diff -q "$clean_fix" - >/dev/null || {
-        echo "clean fixture not byte-identical" >&2
-        return 1
-    }
+    assert_contains "$out" "#EXT-X-PLAYLIST-TYPE:VOD" "clean fixture gets VOD header" || return 1
+    local seg
+    for seg in segment_001.ts segment_002.ts segment_003.ts segment_004.ts; do
+        assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/$seg" "clean movie segment $seg kept" || return 1
+    done
 }
 
 test_is_cache_fresh() {
@@ -353,8 +359,13 @@ EOF
     clean="$CACHE/$hash-clean.m3u8"
     assert_eq "$clean" "$out" "echoes clean file path" || return 1
     [[ -f "$clean" ]] || { echo "clean file missing: $clean" >&2; return 1; }
-    assert_eq 1 "$(grep -c 'convertv8' "$clean")" "boundary convertv8 kept (safe-filter)" || return 1
-    assert_eq 0 "$(grep -c '/v8/' "$clean")" "interior /v8/ ad lines dropped" || return 1
+    # Double-ended safe boundary: first+last ad segment of each block kept.
+    assert_eq 2 "$(grep -c 'convertv8' "$clean")" "convertv8 boundary 2 kept (safe-filter)" || return 1
+    assert_eq 0 "$(grep -c 'convertv8/dQp9IHvN-1' "$clean")" "convertv8 interior dropped" || return 1
+    assert_eq 2 "$(grep -c '/v8/' "$clean")" "/v8/ boundary 2 kept (safe-filter)" || return 1
+    assert_eq 0 "$(grep -c 'segment_0002' "$clean")" "/v8/ interior dropped" || return 1
+    assert_contains "$(cat "$clean")" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
+    assert_eq 0 "$(grep -c 'DISCONTINUITY-SEQUENCE' "$clean")" "DISCONTINUITY-SEQUENCE stripped" || return 1
     local bad
     bad=$(grep -v '^#' "$clean" | grep -v '^$' | grep -vc '^http')
     assert_eq 0 "$bad" "all segment lines start with http" || return 1
@@ -459,6 +470,12 @@ EOF
     assert_contains "$(cat "$argsfile")" "--hr-seek-framedrop=no" "mpv disables framedrop at seek" || return 1
     assert_contains "$(cat "$argsfile")" "--demuxer-readahead-secs=20" "mpv readahead for smooth splice" || return 1
     assert_contains "$(cat "$argsfile")" "--initial-audio-sync=no" "mpv keeps audio continuous at splice" || return 1
+    # Seekable RAM cache: seeks inside the buffer never hit the demuxer, so
+    # PTS gaps left by ad removal cannot reset playback to the start.
+    assert_contains "$(cat "$argsfile")" "--demuxer-seekable-cache=yes" "mpv enables seekable cache" || return 1
+    assert_contains "$(cat "$argsfile")" "--demuxer-max-bytes=150M" "mpv caps read-ahead buffer" || return 1
+    assert_contains "$(cat "$argsfile")" "--demuxer-max-back-bytes=100M" "mpv keeps back-buffer for backward seek" || return 1
+    assert_contains "$(cat "$argsfile")" "--hr-seek=default" "mpv hr-seek default" || return 1
     # --demuxer-lavf-linearize-timestamps=yes is deliberately absent: it
     # rewrites the timeline one-way and breaks backward seek across the
     # PTS jumps left by removed ad segments.
