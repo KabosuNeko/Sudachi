@@ -455,7 +455,7 @@ EOF
 
     PLAYER_DEFAULT=mpv
     QUALITY=
-    PATH="$bin:$curlbin:$PATH" play_video "https://cdn.example/master.m3u8" "Test Title"
+    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
     local i=0
     while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
     local first
@@ -500,12 +500,12 @@ EOF
 
     PLAYER_DEFAULT=mpv
     QUALITY=
-    PATH="$bin:$curlbin:$PATH" play_video "https://cdn.example/master.m3u8" "Test Title"
+    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
     local i=0
     while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
     local first
     first=$(head -1 "$argsfile")
-    assert_eq "https://cdn.example/master.m3u8" "$first" "mpv receives original url" || return 1
+    assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives original url" || return 1
 }
 
 # Fake curl for call_api tests: responds with fixture JSON and counts calls.

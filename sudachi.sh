@@ -574,7 +574,11 @@ play_video() {
     # HLS streams: strip mid-roll ad segments via hls_fetch_clean (falls back
     # to the original URL on any failure, so playback never breaks).
     # Skipped when AD_BLOCK is disabled (0) in settings.
-    if [[ "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]]; then
+    # Ad-stripping is phimapi-CDN specific (kkphimplayer*, phim1280*); ophim
+    # streams (e.g. vip.opstream90.com) have no mid-roll ads and must never
+    # pass through the pipeline — even when replayed from history/favorites.
+    if [[ "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]] && \
+       [[ "$url" == *kkphimplayer* || "$url" == *phim1280* || "$url" == *phimapi* ]]; then
         url=$(hls_fetch_clean "$url")
     fi
 
@@ -857,8 +861,12 @@ show_paginated_list() {
 
 
 fetch_list() {
-    local loai="$1" p="$2" res cdn
-    res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+    local loai="$1" p="$2" extra="$3" res cdn
+    if [[ -n "$extra" ]]; then
+        res=$(call_api "/v1/api/${loai}?${extra}&page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+    else
+        res=$(call_api "/v1/api/${loai}?page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
+    fi
     [[ -z "$res" ]] && return
     cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
     parse_v1_items "$res" "$cdn"
@@ -919,7 +927,7 @@ new_releases() {
         *)
             show_loading
             local res cdn
-            res=$(call_api "/v1/api/danh-sach/phim-moi-cap-nhat-v3?page=1")
+            res=$(call_api "/v1/api/danh-sach/phim-moi-cap-nhat?page=1")
             [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
             cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
             show_list "$(parse_v1_items "$res" "$cdn")" "PHIM MỚI"
@@ -970,7 +978,7 @@ filter_by_genre() {
 
     res=$(call_api "/the-loai")
     [[ -z "$res" ]] && { show_error "Lỗi"; return; }
-    ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
+    ds=$(jq -r '.data.items[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
 
     local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="THỂ LOẠI > ")
     [[ -z "$chon" ]] && return
@@ -980,7 +988,7 @@ filter_by_genre() {
     local ten="${ten_raw#*. }"
 
     fetch_genre() {
-        fetch_list "the-loai/${slug}" "$1"
+        fetch_list "danh-sach/phim-moi" "$1" "category=${slug}"
     }
 
     show_paginated_list "$ten" fetch_genre
@@ -992,7 +1000,7 @@ filter_by_country() {
 
     res=$(call_api "/quoc-gia")
     [[ -z "$res" ]] && { show_error "Lỗi"; return; }
-    ds=$(jq -r '.[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
+    ds=$(jq -r '.data.items[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
 
     local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="QUỐC GIA > ")
     [[ -z "$chon" ]] && return
@@ -1002,7 +1010,7 @@ filter_by_country() {
     local ten="${ten_raw#*. }"
 
     fetch_country() {
-        fetch_list "quoc-gia/${slug}" "$1"
+        fetch_list "danh-sach/phim-moi" "$1" "country=${slug}"
     }
 
     show_paginated_list "$ten" fetch_country
