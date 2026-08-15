@@ -11,6 +11,7 @@ SOURCE_FILE="$CONF/source.conf"
 CONFIG_FILE="$CONF/config"
 PLAYER_DEFAULT="mpv"
 QUALITY=""
+AD_BLOCK=1
 
 mkdir -p "$CONF" "$DL" "$CACHE"
 [ ! -f "$HIST" ] && touch "$HIST"
@@ -84,6 +85,12 @@ load_settings() {
                     auto|"") QUALITY="" ;;
                 esac
                 ;;
+            AD_BLOCK)
+                case "$value" in
+                    0) AD_BLOCK=0 ;;
+                    *) AD_BLOCK=1 ;;
+                esac
+                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -92,6 +99,7 @@ save_settings() {
     {
         printf 'PLAYER_DEFAULT=%s\n' "$PLAYER_DEFAULT"
         printf 'QUALITY=%s\n' "$QUALITY"
+        printf 'AD_BLOCK=%s\n' "$AD_BLOCK"
     } > "$CONFIG_FILE"
     printf '%s\n' "$API_SOURCE" > "$SOURCE_FILE"
 }
@@ -182,11 +190,11 @@ hash_url() {
 
 # HLS_AD_PATTERNS -- awk ERE alternation matching known ad-segment URIs in HLS
 # playlists. Observed on phimapi CDNs: kkphimplayer7 (convertv8/, /v8/...)
-# and kkphimplayer6 (convertv7/, /v7/...). Ads always live in a subdirectory
-# or root-relative path, never flat like movie segments -- so the semantic
-# alternatives (ads*, promo*) are safe to match. Extendable: append new
-# patterns separated by '|'.
-HLS_AD_PATTERNS='convertv[0-9]+/|ads?[0-9]*/|promo[0-9]*/|^/v[0-9]+/[0-9a-f]+/segment_'
+# and kkphimplayer6 (convertv7/, /v7/...). Each pattern is anchored with
+# (^|/) to match only full path components, preventing false positives on
+# movie URLs that happen to contain 'ad' as a substring (e.g. /upload/,
+# /bad/). Extendable: append new patterns separated by '|'.
+HLS_AD_PATTERNS='(^|/)convertv[0-9]+/|(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|^/v[0-9]+/[0-9a-f]+/segment_'
 
 # hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
 # Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
@@ -220,18 +228,17 @@ hls_absolutize_url() {
 }
 
 # hls_strip_ads <base> -- read a media playlist on stdin, write the filtered
-# playlist to stdout. awk accumulates pending tag lines (EXT-X-DISCONTINUITY,
-# EXT-X-KEY:METHOD=NONE, EXTINF); when the following segment URI matches
-# HLS_AD_PATTERNS the pending tags and the URI are dropped (ad block removed),
-# otherwise pending tags are flushed and the URI is absolutized via
-# hls_absolutize_url. While inside a dropped ad block (indrop=1) further
-# DISCONTINUITY/KEY:NONE tags are dropped too (closing brackets of the ad
-# block) so the kept movie segments stay continuous. All other lines pass
-# through verbatim.
+# playlist to stdout. Uses safe-filtering: only drops segments that are fully
+# inside an ad block (consecutive ad-pattern URIs). Boundary segments at the
+# edges of an ad block are KEPT to avoid cutting into movie content that may
+# share a segment with ad material. A single #EXT-X-DISCONTINUITY is emitted
+# at each splice point so the player resets its PTS timeline correctly.
 hls_strip_ads() {
     local base="$1"
 
     awk -v adpat="$HLS_AD_PATTERNS" '
+        # Buffer pending tags (DISCONTINUITY, KEY:NONE, EXTINF) until we see
+        # the segment URI that tells us whether it is ad or movie.
         {
             if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/) {
                 if (!indrop) pend[n++] = $0
@@ -241,11 +248,29 @@ hls_strip_ads() {
                 pend[n++] = $0
                 next
             }
+            # Segment URI line (non-comment, non-empty).
             if ($0 !~ /^#/ && $0 != "") {
                 if ($0 ~ adpat) {
-                    n = 0
-                    indrop = 1
+                    # This segment is an ad.
+                    if (!indrop) {
+                        # First ad after movie content — this is a boundary
+                        # segment that might contain movie frames at its start.
+                        # Safe-filter: keep it to avoid losing movie content.
+                        for (i = 0; i < n; i++) print pend[i]
+                        n = 0
+                        print
+                        indrop = 1
+                    } else {
+                        # Consecutive ad segment deep inside the ad block —
+                        # safe to drop.
+                        n = 0
+                    }
                     next
+                }
+                # This segment is movie content.
+                if (indrop) {
+                    # Exiting ad block. Emit DISCONTINUITY at splice point.
+                    print "#EXT-X-DISCONTINUITY"
                 }
                 indrop = 0
                 for (i = 0; i < n; i++) print pend[i]
@@ -253,6 +278,7 @@ hls_strip_ads() {
                 print
                 next
             }
+            # Any other line (headers, EXT-X-ENDLIST, etc.): flush and pass.
             for (i = 0; i < n; i++) print pend[i]
             n = 0
             print
@@ -505,7 +531,8 @@ play_video() {
 
     # HLS streams: strip mid-roll ad segments via hls_fetch_clean (falls back
     # to the original URL on any failure, so playback never breaks).
-    if [[ "$url" == *".m3u8"* ]]; then
+    # Skipped when AD_BLOCK is disabled (0) in settings.
+    if [[ "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]]; then
         url=$(hls_fetch_clean "$url")
     fi
 
@@ -521,6 +548,12 @@ play_video() {
             # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
             if [[ "$url" == *".m3u8"* ]]; then
                 mpv_args+=("--cache=yes")
+                # Prevent mpv from dropping frames or swallowing audio at
+                # DISCONTINUITY splice points left by ad removal. Without
+                # these, mpv drops 0.5-1s of movie content after each cut.
+                mpv_args+=("--hr-seek-framedrop=no")
+                mpv_args+=("--demuxer-readahead-secs=20")
+                mpv_args+=("--initial-audio-sync=no")
                 # Local cleaned playlist: ffmpeg hls demuxer restricts segment
                 # protocols to file,crypto,data by default and refuses https
                 # segments, stalling playback every few seconds. Force hls and
@@ -1117,10 +1150,26 @@ clear_cache() {
     sleep 1
 }
 
+toggle_ad_block() {
+    if [[ "$AD_BLOCK" == "1" ]]; then
+        AD_BLOCK=0
+        echo -e "${C_Y}  Chặn quảng cáo: TẮT${C_R}"
+    else
+        AD_BLOCK=1
+        echo -e "${C_G}  Chặn quảng cáo: BẬT${C_R}"
+    fi
+    save_settings
+    sleep 1
+}
+
 settings() {
+    local ad_status
+    [[ "$AD_BLOCK" == "1" ]] && ad_status="BẬT" || ad_status="TẮT"
+
     local menu="Chọn Trình Phát ${I_PLAYER}|player
 Đổi Nguồn ${I_SOURCE}|nguon
 Chất Lượng ${I_QUA}|quality
+Chặn Quảng Cáo: ${ad_status} 󰫈 |adblock
 Mở Thư Mục ${I_DIR}|folder
 Xóa Cache ${I_CACHE}|cache"
 
@@ -1132,6 +1181,7 @@ Xóa Cache ${I_CACHE}|cache"
         player)  select_player ;;
         nguon)   select_source ;;
         quality) select_quality ;;
+        adblock) toggle_ad_block ;;
         folder)  thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
         cache)   clear_cache ;;
     esac

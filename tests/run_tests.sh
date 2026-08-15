@@ -157,13 +157,17 @@ test_hls_strip_ads() {
     local out
 
     out=$(hls_strip_ads "$base" < "$ad_fix")
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "no convertv8 ad lines" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "no /v8/ ad lines" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "no convertv7 ad lines" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "no /v7/ ad lines" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "no ads9/ ad lines (semantic pattern)" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "no promo7/ ad lines (semantic pattern)" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" "no stray discontinuity (ad closing brackets dropped)" || return 1
+    # Safe-filter: the first ad segment (boundary) is KEPT; only interior
+    # consecutive ad segments are dropped.
+    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "boundary convertv8 kept (safe-filter)" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "interior /v8/ ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "interior convertv7 ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "interior /v7/ ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "interior ads9/ ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "interior promo7/ ad lines dropped" || return 1
+    # Expect 2 DISCONTINUITY: one from the original pend before boundary ad,
+    # one emitted at the splice point when exiting the ad block.
+    assert_eq 2 "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" "discontinuity at boundary entry and splice exit" || return 1
     assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept" || return 1
     assert_contains "$out" "#EXTM3U" "header kept" || return 1
     assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_001.ts" "movie segment kept + absolutized" || return 1
@@ -237,6 +241,7 @@ test_load_settings() {
     assert_eq "phimapi" "$API_SOURCE" "default source" || return 1
     assert_eq "mpv" "$PLAYER_DEFAULT" "default player" || return 1
     assert_eq "" "$QUALITY" "default quality" || return 1
+    assert_eq 1 "$AD_BLOCK" "default ad_block" || return 1
 
     # With config present: quoted values, whitespace, comments, invalid lines.
     printf 'PLAYER_DEFAULT = "vlc"\n' > "$CONFIG_FILE"
@@ -262,16 +267,19 @@ test_save_settings() {
     API_SOURCE=ophim1
     PLAYER_DEFAULT=vlc
     QUALITY=480
+    AD_BLOCK=0
     save_settings
     assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
     assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
+    assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
     assert_eq "ophim1" "$(cat "$SOURCE_FILE")" "source file" || return 1
     # Round-trip through load_settings.
-    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY=
+    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1
     load_settings
     assert_eq "ophim1" "$API_SOURCE" "roundtrip source" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
+    assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
 }
 
 test_check_dependencies() {
@@ -345,8 +353,8 @@ EOF
     clean="$CACHE/$hash-clean.m3u8"
     assert_eq "$clean" "$out" "echoes clean file path" || return 1
     [[ -f "$clean" ]] || { echo "clean file missing: $clean" >&2; return 1; }
-    assert_eq 0 "$(grep -c 'convertv8' "$clean")" "no convertv8 ad lines" || return 1
-    assert_eq 0 "$(grep -c '/v8/' "$clean")" "no /v8/ ad lines" || return 1
+    assert_eq 1 "$(grep -c 'convertv8' "$clean")" "boundary convertv8 kept (safe-filter)" || return 1
+    assert_eq 0 "$(grep -c '/v8/' "$clean")" "interior /v8/ ad lines dropped" || return 1
     local bad
     bad=$(grep -v '^#' "$clean" | grep -v '^$' | grep -vc '^http')
     assert_eq 0 "$bad" "all segment lines start with http" || return 1
@@ -447,6 +455,10 @@ EOF
     # (ffmpeg refuses https segments with the default file,crypto,data list).
     assert_contains "$(cat "$argsfile")" "--demuxer-lavf-format=hls" "mpv forces hls demuxer" || return 1
     assert_contains "$(cat "$argsfile")" 'protocol_whitelist="https,http,file,tcp,tls,crypto,data"' "mpv widens segment protocol whitelist" || return 1
+    # Anti-framedrop flags for DISCONTINUITY splice points.
+    assert_contains "$(cat "$argsfile")" "--hr-seek-framedrop=no" "mpv disables framedrop at seek" || return 1
+    assert_contains "$(cat "$argsfile")" "--demuxer-readahead-secs=20" "mpv readahead for smooth splice" || return 1
+    assert_contains "$(cat "$argsfile")" "--initial-audio-sync=no" "mpv keeps audio continuous at splice" || return 1
     # --demuxer-lavf-linearize-timestamps=yes is deliberately absent: it
     # rewrites the timeline one-way and breaks backward seek across the
     # PTS jumps left by removed ad segments.
