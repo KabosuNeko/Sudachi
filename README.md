@@ -1,5 +1,7 @@
 # Sudachi
 
+[![CI](https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml/badge.svg)](https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml)
+
 <p><br/></p>
 <p align="center">
   <img src="https://github.com/user-attachments/assets/55e3eb61-f479-40c1-be9a-6dd0b4c3b400" alt="Sudachi Logo" style="width: 192px" />
@@ -44,6 +46,16 @@ bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/su
 ### Hoặc thêm alias vào `~/.bashrc`
 ```bash
 alias sudachi='bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"'
+```
+
+### Tùy chọn dòng lệnh (CLI Flags)
+```bash
+sudachi -s "tên phim"  # Tìm kiếm phim trực tiếp
+sudachi -c             # Tiếp tục xem tập gần nhất trong lịch sử
+sudachi -l             # Mở danh sách Phim Mới
+sudachi -a             # Mở danh mục Anime
+sudachi -d             # Xem tiến độ và danh sách tải phim
+sudachi -h             # Hiển thị bảng trợ giúp
 ```
 
 ## Hệ thống Phím tắt (episode picker)

@@ -12,6 +12,8 @@ CONFIG_FILE="$CONF/config"
 PLAYER_DEFAULT="mpv"
 QUALITY=""
 AD_BLOCK=1
+AUTO_NEXT=1
+LAST_PLAYER_PID=""
 
 mkdir -p "$CONF" "$DL" "$CACHE"
 [ ! -f "$HIST" ] && touch "$HIST"
@@ -91,6 +93,12 @@ load_settings() {
                     *) AD_BLOCK=1 ;;
                 esac
                 ;;
+            AUTO_NEXT)
+                case "$value" in
+                    0) AUTO_NEXT=0 ;;
+                    *) AUTO_NEXT=1 ;;
+                esac
+                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -100,6 +108,7 @@ save_settings() {
         printf 'PLAYER_DEFAULT=%s\n' "$PLAYER_DEFAULT"
         printf 'QUALITY=%s\n' "$QUALITY"
         printf 'AD_BLOCK=%s\n' "$AD_BLOCK"
+        printf 'AUTO_NEXT=%s\n' "$AUTO_NEXT"
     } > "$CONFIG_FILE"
     printf '%s\n' "$API_SOURCE" > "$SOURCE_FILE"
 }
@@ -188,13 +197,13 @@ hash_url() {
     printf '%s' "$input" | cksum | cut -d' ' -f1
 }
 
-# HLS_AD_PATTERNS -- awk ERE alternation matching known ad-segment URIs in HLS
-# playlists. Observed on phimapi CDNs: kkphimplayer7 (convertv8/, /v8/...)
-# and kkphimplayer6 (convertv7/, /v7/...). Each pattern is anchored with
-# (^|/) to match only full path components, preventing false positives on
-# movie URLs that happen to contain 'ad' as a substring (e.g. /upload/,
-# /bad/). Extendable: append new patterns separated by '|'.
-HLS_AD_PATTERNS='(^|/)convertv[0-9]+/|(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|^/v[0-9]+/[0-9a-f]+/segment_'
+# HLS_AD_PATTERNS -- awk ERE alternation matching standalone video ad URIs.
+# Standalone video ads (gambling commercials, slot machine clips) live in
+# dedicated paths like /v[0-9]+/<hash>/segment_ or ads*/, promo*/.
+# Note: convertv[0-9]+/ segments are NOT video commercials; they are the actual
+# movie/anime scenes with a sponsor text watermark re-encoded on top. Dropping
+# convertv* cuts real movie dialogue and content, so they must be kept.
+HLS_AD_PATTERNS='(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|(^|/)v[0-9]+/[0-9a-f]+/segment_'
 
 # hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
 # Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
@@ -228,42 +237,30 @@ hls_absolutize_url() {
 }
 
 # hls_strip_ads <base> -- read a media playlist on stdin, write the filtered
-# playlist to stdout. Safe-filtering: keeps the FIRST and LAST segment of each
-# ad block (boundary segments may share frames with movie content — the API
-# appends a short movie piece to the ad tail) and only drops the pure ad
-# segments in between; a single #EXT-X-DISCONTINUITY is emitted at each splice
-# point so the player resets its PTS timeline correctly. Header normalization:
+# playlist to stdout. Drops all mid-roll and pre/post-roll ad segments
+# matching HLS_AD_PATTERNS, preserves all movie segments and their metadata
+# (#EXTINF), and emits a single #EXT-X-DISCONTINUITY at each ad splice point
+# so the player resets its PTS timeline correctly. Header normalization:
 # strips #EXT-X-DISCONTINUITY-SEQUENCE (its index shifts after ad removal and
 # poisons ffmpeg seek tables) and guarantees #EXT-X-PLAYLIST-TYPE:VOD.
 # Segments resolving into the playlist's own directory are movie content and
 # are never treated as ads, even when they match HLS_AD_PATTERNS.
+# Segment URIs are absolutized directly in awk for high performance.
 hls_strip_ads() {
     local base="$1" basedir basehost
     basedir="${base%/*}"
     basehost=$(printf '%s' "$base" | sed -E 's|^(https?://[^/]+).*|\1|')
 
     awk -v adpat="$HLS_AD_PATTERNS" -v basedir="$basedir" -v basehost="$basehost" '
+        function absolutize(u) {
+            if (u ~ /^https?:\/\//) return u
+            if (u ~ /^\//) return basehost u
+            return basedir "/" u
+        }
         function seg_is_movie(u,   abs) {
-            if (u ~ /^https?:\/\//) abs = u
-            else if (u ~ /^\//) abs = basehost u
-            else abs = basedir "/" u
+            abs = absolutize(u)
             sub(/\/[^\/]*$/, "", abs)
             return (abs == basedir)
-        }
-        function flush_block(   i) {
-            for (i = 0; i < ahead_n; i++) print ahead[i]
-            if (acount >= 2) {
-                print "#EXT-X-DISCONTINUITY"
-                print aextinf
-                print auri
-            }
-            ahead_n = 0
-            in_ad = 0
-            acount = 0
-            aextinf = ""
-            auri = ""
-            atags_n = 0
-            aextinf_tmp = ""
         }
         {
             if ($0 ~ /^#EXTM3U/) {
@@ -273,68 +270,74 @@ hls_strip_ads() {
             }
             if ($0 ~ /^#EXT-X-PLAYLIST-TYPE/) { next }
             if ($0 ~ /^#EXT-X-DISCONTINUITY-SEQUENCE/) { next }
-            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY:METHOD=NONE/) {
-                if (in_ad) { atags[atags_n++] = $0; next }
-                pend[n++] = $0
-                next
-            }
-            if ($0 ~ /^#EXTINF/) {
-                if (in_ad) { aextinf_tmp = $0; next }
-                pend[n++] = $0
-                next
-            }
+
             # Segment URI line (non-comment, non-empty).
             if ($0 !~ /^#/ && $0 != "") {
                 if ($0 ~ adpat && !seg_is_movie($0)) {
-                    if (!in_ad) {
-                        # First segment of an ad block: snapshot the leading
-                        # tags + this URI as the entry boundary.
-                        in_ad = 1
-                        acount = 1
-                        for (i = 0; i < n; i++) ahead[ahead_n++] = pend[i]
-                        ahead[ahead_n++] = $0
-                        n = 0
-                    } else {
-                        # Consecutive ad segment: remember it as the exit
-                        # boundary (interior tags are dropped).
-                        acount++
-                        aextinf = aextinf_tmp
-                        auri = $0
-                        aextinf_tmp = ""
-                        atags_n = 0
-                    }
+                    in_ad = 1
+                    had_ad = 1
+                    pend_n = 0
+                    ad_pend_n = 0
                     next
                 }
-                # Movie segment: end of ad block (if any).
+                # Movie segment
                 if (in_ad) {
-                    for (i = 0; i < atags_n; i++) pend[n++] = atags[i]
-                    if (aextinf_tmp != "") pend[n++] = aextinf_tmp
-                    flush_block()
+                    in_ad = 0
                 }
-                for (i = 0; i < n; i++) print pend[i]
-                n = 0
+                if (had_ad) {
+                    if (movie_count > 0) {
+                        print "#EXT-X-DISCONTINUITY"
+                    }
+                    had_ad = 0
+                }
+                if (ad_pend_n > 0) {
+                    for (i = 0; i < ad_pend_n; i++) print ad_pend[i]
+                    ad_pend_n = 0
+                } else {
+                    for (i = 0; i < pend_n; i++) print pend[i]
+                    pend_n = 0
+                }
+                print absolutize($0)
+                movie_count++
+                next
+            }
+
+            # ENDLIST must terminate ad block and pass through
+            if ($0 ~ /^#EXT-X-ENDLIST/) {
+                in_ad = 0
+                pend_n = 0
+                ad_pend_n = 0
                 print
                 next
             }
-            # Any other line (headers, EXT-X-ENDLIST, etc.): flush and pass.
-            for (i = 0; i < n; i++) print pend[i]
-            n = 0
+
+            # Tag lines inside ad block
+            if (in_ad) {
+                if ($0 ~ /^#EXTINF/ || ($0 ~ /^#EXT-X-KEY/ && $0 !~ /METHOD=NONE/)) {
+                    ad_pend[ad_pend_n++] = $0
+                }
+                next
+            }
+
+            # Tag lines before movie segments
+            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY/) {
+                pend[pend_n++] = $0
+                next
+            }
+            if ($0 ~ /^#EXTINF/) {
+                pend[pend_n++] = $0
+                next
+            }
+
+            # Any other line (headers, etc.): flush and pass.
+            for (i = 0; i < pend_n; i++) print pend[i]
+            pend_n = 0
             print
         }
         END {
-            if (in_ad) {
-                for (i = 0; i < atags_n; i++) pend[n++] = atags[i]
-                flush_block()
-            }
-            for (i = 0; i < n; i++) print pend[i]
+            for (i = 0; i < pend_n; i++) print pend[i]
         }
-    ' | while IFS= read -r line; do
-        if [[ "$line" != '#'* ]] && [[ -n "$line" ]]; then
-            printf '%s\n' "$(hls_absolutize_url "$base" "$line")"
-        else
-            printf '%s\n' "$line"
-        fi
-    done
+    '
 }
 
 # hls_fetch_clean <url> -- fetch an HLS playlist (master or media), strip ad
@@ -350,7 +353,7 @@ hls_fetch_clean() {
         return 0
     }
     if printf '%s' "$master" | grep -q '^#EXT-X-STREAM-INF'; then
-        variant=$(printf '%s\n' "$master" | awk '/^#EXT-X-STREAM-INF/{getline; print; exit}')
+        variant=$(printf '%s\n' "$master" | awk '/^#EXT-X-STREAM-INF/{while(getline > 0){if($0 !~ /^#/ && $0 != ""){print; exit}}}')
         media=$(hls_absolutize_url "$url" "$variant")
     else
         media="$url"
@@ -375,9 +378,9 @@ hls_fetch_clean() {
         log_debug "hls_fetch_clean: $media has DISCONTINUITY but no ad-pattern match — HLS_AD_PATTERNS may need updating"
     fi
     hash=$(hash_url "$url")
-    tmp="$CACHE/.tmp-$$.m3u8"
+    tmp=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp="$CACHE/.tmp-$$.m3u8"
     if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
-        if mv -f "$tmp" "$CACHE/$hash-clean.m3u8" 2>/dev/null; then
+        if [[ -s "$tmp" ]] && mv -f "$tmp" "$CACHE/$hash-clean.m3u8" 2>/dev/null; then
             echo "$CACHE/$hash-clean.m3u8"
         else
             rm -f "$tmp"
@@ -530,17 +533,60 @@ download_episode() {
         return 1
     fi
 
-    file="${title//[[:space:]]/_}"
-    file="${file//[!a-zA-Z0-9_.-]/}.mp4"
-    [[ "$file" == ".mp4" ]] && printf -v file 'sudachi_%(%s)T.mp4' -1
+    local safe_title
+    safe_title=$(printf '%s' "$title" | sed 's|[/\\:*?"<>|]| - |g' | tr -s ' ' | sed 's/^ *//;s/ *$//' | tr ' ' '_')
+    file="${safe_title:-sudachi_$(date +%s)}.mp4"
 
-    if command -v aria2c >/dev/null 2>&1; then
-        yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 >/dev/null 2>&1 &
-    else
-        yt-dlp "$url" -o "$DL/$file" >/dev/null 2>&1 &
-    fi
+    mkdir -p "$CACHE/downloads"
+    local log_file="$CACHE/downloads/$(date +%s)_${file}.log"
 
-    command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" " Đang tải: $title"
+    (
+        if command -v aria2c >/dev/null 2>&1; then
+            yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 > "$log_file" 2>&1
+        else
+            yt-dlp "$url" -o "$DL/$file" > "$log_file" 2>&1
+        fi
+        local rc=$?
+        if [[ $rc -eq 0 ]]; then
+            command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" "✅ Tải xong: $title"
+        else
+            command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Sudachi" "❌ Lỗi khi tải: $title"
+        fi
+    ) &
+    local dl_pid=$!
+    printf '%s|%s|%s|%s\n' "$dl_pid" "$title" "$file" "$log_file" >> "$CACHE/downloads/tasks.log"
+
+    command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" "⬇ Đang tải: $title"
+    echo -e "${C_G}  Đang tải: $title${C_R}"
+    echo -e "${C_C}  Lưu tại: $DL/$file${C_R}"
+    sleep 1
+}
+
+view_downloads() {
+    local task_file="$CACHE/downloads/tasks.log"
+    [[ ! -s "$task_file" ]] && { show_error "Chưa có lượt tải nào"; return; }
+
+    local list="" pid title file log
+    while IFS='|' read -r pid title file log; do
+        [[ -z "$pid" ]] && continue
+        local status
+        if kill -0 "$pid" 2>/dev/null; then
+            status="[Đang tải]"
+        elif grep -qi "100%" "$log" 2>/dev/null || [[ -s "$DL/$file" ]]; then
+            status="[Hoàn tất]"
+        else
+            status="[Đã dừng]"
+        fi
+        list="${status} ${title}|${log}"$'\n'"$list"
+    done < "$task_file"
+
+    [[ -z "$list" ]] && { show_error "Chưa có lượt tải nào"; return; }
+
+    local chon
+    chon=$(echo -e "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 --prompt="TẢI PHIM > " \
+        --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:60%:wrap)
+    [[ -z "$chon" ]] && return
 }
 
 check_player() {
@@ -587,9 +633,10 @@ play_video() {
             local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" "${extra_args[@]}")
             [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
             vlc "${vlc_args[@]}" >/dev/null 2>&1 &
+            LAST_PLAYER_PID=$!
             ;;
         *)
-            local mpv_args=("$url" "--title=$title" "--force-window" "${extra_args[@]}")
+            local mpv_args=("$url" "--title=$title" "--force-window" "--save-position-on-quit" "${extra_args[@]}")
             # Seekable demuxer cache for HLS: enables smooth seek on the
             # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
             if [[ "$url" == *".m3u8"* ]]; then
@@ -602,12 +649,10 @@ play_video() {
                 mpv_args+=("--demuxer-max-bytes=150M")
                 mpv_args+=("--demuxer-max-back-bytes=100M")
                 mpv_args+=("--hr-seek=default")
-                # Prevent mpv from dropping frames or swallowing audio at
-                # DISCONTINUITY splice points left by ad removal. Without
-                # these, mpv drops 0.5-1s of movie content after each cut.
+                # Prevent mpv from dropping frames at DISCONTINUITY splice
+                # points left by ad removal.
                 mpv_args+=("--hr-seek-framedrop=no")
                 mpv_args+=("--demuxer-readahead-secs=20")
-                mpv_args+=("--initial-audio-sync=no")
                 # Local cleaned playlist: ffmpeg hls demuxer restricts segment
                 # protocols to file,crypto,data by default and refuses https
                 # segments, stalling playback every few seconds. Force hls and
@@ -621,6 +666,7 @@ play_video() {
                 mpv_args+=("--ytdl-format=bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]/best")
             fi
             mpv "${mpv_args[@]}" >/dev/null 2>&1 &
+            LAST_PLAYER_PID=$!
             ;;
     esac
 }
@@ -647,6 +693,13 @@ create_preview_script() {
     local script
     script=$(mktemp "$CACHE/preview.XXXXXX.sh") || return 1
     register_temp "$script"
+
+    local api_base
+    case "$API_SOURCE" in
+        phimapi) api_base="$API_PHIMAPI" ;;
+        *)       api_base="$API_OPHIM1" ;;
+    esac
+
     cat > "$script" << EOF
 #!/bin/bash
 IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
@@ -659,7 +712,6 @@ echo ""
 [[ -n "\$nam" && "\$nam" != "null" ]] && echo -e "  \033[0;35m󰃰 Năm:\033[0m \$nam"
 [[ -n "\$quocgia" && "\$quocgia" != "null" ]] && echo -e "  \033[0;36m󰇧 Quốc gia:\033[0m \$quocgia"
 [[ -n "\$trangthai" && "\$trangthai" != "null" ]] && echo -e "  \033[0;36m󱖫 Trạng thái:\033[0m \$trangthai"
-echo ""
 
 img_url="\$anh"
 if [[ "\$source" == "ophim1" && -n "\$slug" ]]; then
@@ -682,6 +734,38 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
         wait
     fi
 fi
+
+if [[ -n "\$slug" && "\$slug" != "null" ]]; then
+    desc_cache="$CACHE/desc"
+    mkdir -p "\$desc_cache"
+    desc_file="\$desc_cache/\${slug}.txt"
+
+    if [[ -f "\$desc_file" ]]; then
+        cat "\$desc_file"
+    else
+        detail_res=\$(curl -fsS --max-time 2 "${api_base}/phim/\${slug}" 2>/dev/null)
+        if [[ -n "\$detail_res" ]]; then
+            origin_name=\$(jq -r '.movie.origin_name // ""' <<< "\$detail_res" 2>/dev/null)
+            time_dur=\$(jq -r '.movie.time // ""' <<< "\$detail_res" 2>/dev/null)
+            cats=\$(jq -r '[.movie.category[]?.name] | join(", ")' <<< "\$detail_res" 2>/dev/null)
+            raw_content=\$(jq -r '.movie.content // ""' <<< "\$detail_res" 2>/dev/null)
+            clean_content=\$(printf '%s' "\$raw_content" | sed -E 's/<[^>]+>/ /g' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+            {
+                echo ""
+                [[ -n "\$origin_name" && "\$origin_name" != "null" ]] && echo -e "  \033[0;33m󰑈 Tên gốc:\033[0m \$origin_name"
+                [[ -n "\$time_dur" && "\$time_dur" != "null" ]] && echo -e "  \033[0;32m󱎫 Thời lượng:\033[0m \$time_dur"
+                [[ -n "\$cats" && "\$cats" != "null" ]] && echo -e "  \033[0;34m󰘯 Thể loại:\033[0m \$cats"
+                if [[ -n "\$clean_content" && "\$clean_content" != "null" ]]; then
+                    echo ""
+                    echo -e "  \033[1;37m󰧭 Tóm tắt:\033[0m"
+                    printf '%s\n' "\$clean_content" | fold -s -w 40 | sed 's/^/   /'
+                fi
+            } > "\$desc_file"
+            cat "\$desc_file"
+        fi
+    fi
+fi
 EOF
     chmod +x "$script"
     echo "$script"
@@ -693,11 +777,11 @@ pick_server() {
     local idx=0
 
     local parsed name_list
-    parsed=$(jq -r '
-        ['${episodes_path}'[] | .server_name] as $names
-        | ($names | length) as $count
-        | "COUNT=\($count)", $names[]
-    ' <<< "$res" 2>/dev/null) || return 1
+    parsed=$(jq -r "
+        [${episodes_path}[] | .server_name] as \$names
+        | (\$names | length) as \$count
+        | \"COUNT=\(\$count)\", \$names[]
+    " <<< "$res" 2>/dev/null) || return 1
 
     local count
     IFS= read -r count <<< "$parsed"
@@ -741,7 +825,11 @@ watch_episode() {
         last_ep=$(awk -F'|' -v s="$slug" '$1 == s {ep=$2} END {if (ep != "") print ep}' "$PROGRESS")
     fi
     local continue_header=""
-    [[ -n "$last_ep" ]] && continue_header="  ▶ Tiếp: Tập ${last_ep}"
+    if [[ -n "$last_ep" ]]; then
+        local last_ep_label="$last_ep"
+        [[ "$last_ep" =~ ^[0-9]+$ ]] && last_ep_label="Tập ${last_ep}"
+        continue_header="  ▶ Tiếp: ${last_ep_label}"
+    fi
 
     local chon=""
     local phim=""
@@ -763,17 +851,62 @@ watch_episode() {
         [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
         [[ -z "$data" ]] && break
 
-    local tap="${data%%|*}"
-    local url="${data#*|}"
-        local tieu_de="${ten} - Tập ${tap}"
+        local tap="${data%%|*}"
+        local url="${data#*|}"
+        local tieu_de
+        if [[ "$tap" =~ ^[0-9]+$ ]]; then
+            tieu_de="${ten} - Tập ${tap}"
+        else
+            tieu_de="${ten} - ${tap}"
+        fi
 
         case "$phim" in
             enter)
-                record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
-                record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
-                continue_header="  ▶ Tiếp: Tập ${tap}"
+                while true; do
+                    record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
+                    record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
+                    local tap_label="$tap"
+                    [[ "$tap" =~ ^[0-9]+$ ]] && tap_label="Tập ${tap}"
+                    continue_header="  ▶ Tiếp: ${tap_label}"
 
-                play_video "$url" "$tieu_de"
+                    play_video "$url" "$tieu_de"
+
+                    [[ "$AUTO_NEXT" != "1" ]] && break
+                    [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
+
+                    local next_entry
+                    next_entry=$(awk -F'|' -v cur="$url" '
+                        found { print; exit }
+                        $2 == cur { found = 1 }
+                    ' <<< "$ds_tap")
+
+                    if [[ -z "$next_entry" ]]; then
+                        echo -e "${C_G}  🎉 Bạn đã xem đến tập cuối cùng!${C_R}"
+                        sleep 2
+                        break
+                    fi
+
+                    local next_tap="${next_entry%%|*}"
+                    local next_url="${next_entry#*|}"
+                    local next_label="$next_tap"
+                    [[ "$next_tap" =~ ^[0-9]+$ ]] && next_label="Tập ${next_tap}"
+                    local next_tieu_de="${ten} - ${next_label}"
+
+                    echo ""
+                    echo -e "${C_C}  ▶ Tự động chuyển tiếp: ${next_tieu_de}${C_R}"
+                    echo -e "${C_Y}  (Nhấn 'q' trong 3 giây để dừng)...${C_R}"
+
+                    local stop_key=""
+                    read -r -t 3 -n 1 stop_key 2>/dev/null
+                    echo ""
+                    if [[ "$stop_key" == "q" || "$stop_key" == "Q" ]]; then
+                        break
+                    fi
+
+                    tap="$next_tap"
+                    url="$next_url"
+                    tieu_de="$next_tieu_de"
+                done
                 ;;
             tab)
                 download_episode "$url" "$tieu_de"
@@ -896,12 +1029,20 @@ EOF
 }
 
 search() {
-
+    local initial_query="$1"
     local search preview
     search=$(create_search_script) || { show_error "Không tạo được script tìm kiếm"; return; }
     preview=$(create_preview_script) || { rm -f "$search"; show_error "Không tạo được preview"; return; }
 
-    local chon=$(echo "" | fzf "${FZF_OPTS[@]}" \
+    local fzf_query_arg=()
+    local initial_input=""
+    if [[ -n "$initial_query" ]]; then
+        fzf_query_arg=(--query="$initial_query")
+        initial_input=$("$search" "$initial_query" 2>/dev/null | awk '{printf "%d. %s\n", NR, $0}')
+    fi
+
+    local chon=$(printf '%s\n' "$initial_input" | fzf "${FZF_OPTS[@]}" \
+        "${fzf_query_arg[@]}" \
         --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
         --delimiter='|' --with-nth=1,2 \
         --bind "change:reload:sleep 0.2; $search {q} | awk '{printf \"%d. %s\\n\", NR, \$0}' || true" \
@@ -1071,9 +1212,10 @@ history() {
 
     local chon=$(sort -rn "$HIST" | add_list_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1,3 --prompt="LỊCH SỬ > ")
     [[ -z "$chon" ]] && return
-    chon="${chon#*| }"
-    IFS='|' read -r _ slug _ url _ <<< "$chon"
-    play_video "$url" "$slug"
+    local title url
+    IFS='|' read -r _ _ title _ url <<< "$chon"
+    [[ -z "$url" ]] && return
+    play_video "$url" "$title"
 }
 
 
@@ -1098,8 +1240,8 @@ favorites() {
     [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
     [[ -z "$data" ]] && return
 
-    local slug="${data#*|}"
-    local ten="${data%%|*}"
+    local ten slug year poster
+    IFS='|' read -r ten slug year poster <<< "$data"
 
     case "$phim" in
         enter)  watch_episode "$slug" "$ten" ;;
@@ -1220,14 +1362,29 @@ toggle_ad_block() {
     sleep 1
 }
 
+toggle_auto_next() {
+    if [[ "$AUTO_NEXT" == "1" ]]; then
+        AUTO_NEXT=0
+        echo -e "${C_Y}  Tự động chuyển tập: TẮT${C_R}"
+    else
+        AUTO_NEXT=1
+        echo -e "${C_G}  Tự động chuyển tập: BẬT${C_R}"
+    fi
+    save_settings
+    sleep 1
+}
+
 settings() {
-    local ad_status
+    local ad_status auto_next_status
     [[ "$AD_BLOCK" == "1" ]] && ad_status="BẬT" || ad_status="TẮT"
+    [[ "$AUTO_NEXT" == "1" ]] && auto_next_status="BẬT" || auto_next_status="TẮT"
 
     local menu="Chọn Trình Phát ${I_PLAYER}|player
 Đổi Nguồn ${I_SOURCE}|nguon
 Chất Lượng ${I_QUA}|quality
 Chặn Quảng Cáo: ${ad_status} 󰫈 |adblock
+Tự Động Chuyển Tập: ${auto_next_status} 󰫈 |autonext
+Tiến Độ Tải Phim 󰇚 |downloads
 Mở Thư Mục ${I_DIR}|folder
 Xóa Cache ${I_CACHE}|cache"
 
@@ -1236,12 +1393,14 @@ Xóa Cache ${I_CACHE}|cache"
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
-        player)  select_player ;;
-        nguon)   select_source ;;
-        quality) select_quality ;;
-        adblock) toggle_ad_block ;;
-        folder)  thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
-        cache)   clear_cache ;;
+        player)    select_player ;;
+        nguon)     select_source ;;
+        quality)   select_quality ;;
+        adblock)   toggle_ad_block ;;
+        autonext)  toggle_auto_next ;;
+        downloads) view_downloads ;;
+        folder)    thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
+        cache)     clear_cache ;;
     esac
 }
 
@@ -1296,10 +1455,70 @@ main_menu() {
     echo -e "$menu_items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
 }
 
+handle_cli_args() {
+    [[ $# -eq 0 ]] && return 0
+
+    case "$1" in
+        -h|--help)
+            echo -e "${C_G}Sudachi — Trình xem phim & anime tiếng Việt trên Terminal${C_R}"
+            echo ""
+            echo "Cách dùng: sudachi [tùy chọn]"
+            echo ""
+            echo "Tùy chọn:"
+            echo "  -s, --search [TỪ_KHÓA]    Tìm kiếm phim trực tiếp"
+            echo "  -c, --continue            Xem tiếp tập phim đang xem dở gần nhất"
+            echo "  -l, --latest              Mở danh sách Phim Mới"
+            echo "  -a, --anime               Mở danh mục Anime"
+            echo "  -d, --downloads           Xem tiến độ và danh sách tải phim"
+            echo "  -h, --help                Hiển thị trợ giúp này"
+            echo ""
+            exit 0
+            ;;
+        -s|--search)
+            shift
+            search "$*"
+            exit 0
+            ;;
+        -c|--continue)
+            if [[ -s "$HIST" ]]; then
+                local last_line
+                last_line=$(sort -rn "$HIST" | head -1)
+                local title url
+                IFS='|' read -r _ title _ url <<< "$last_line"
+                if [[ -n "$url" ]]; then
+                    echo -e "${C_G}▶ Tiếp tục xem: $title${C_R}"
+                    play_video "$url" "$title"
+                    exit 0
+                fi
+            fi
+            echo -e "${C_Y}Chưa có lịch sử xem phim nào.${C_R}"
+            exit 1
+            ;;
+        -l|--latest)
+            new_releases
+            exit 0
+            ;;
+        -a|--anime)
+            anime_mode
+            exit 0
+            ;;
+        -d|--downloads)
+            view_downloads
+            exit 0
+            ;;
+        *)
+            echo -e "${C_Y}Tùy chọn không hợp lệ: $1${C_R}"
+            echo "Chạy 'sudachi --help' để xem danh sách tùy chọn."
+            exit 1
+            ;;
+    esac
+}
+
 
 load_settings
 check_dependencies
 check_player
+handle_cli_args "$@"
 
 while true; do
     show_banner

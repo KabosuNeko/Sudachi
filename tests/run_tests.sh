@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for sudachi.sh — locks observable behavior before slop removal.
+# Regression test suite for sudachi.sh
 # Usage: bash tests/run_tests.sh
 # Each test runs in an isolated subshell with a fresh HOME and re-sources the
 # (truncated) library, so no test can leak state into another.
@@ -157,17 +157,13 @@ test_hls_strip_ads() {
     local out
 
     out=$(hls_strip_ads "$base" < "$ad_fix")
-    # Double-ended safe boundary: the FIRST and LAST segment of each ad block
-    # are kept (they may share frames with movie content — the API appends a
-    # short movie piece to the ad tail); only interior ad segments are dropped.
-    assert_eq 2 "$(printf '%s\n' "$out" | grep -c 'convertv8')" "convertv8 block: 3 segs -> keep boundary 2" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'convertv8/dQp9IHvN-1')" "convertv8 interior segment dropped" || return 1
-    assert_eq 2 "$(printf '%s\n' "$out" | grep -c '/v8/')" "/v8/ block: 3 segs -> keep boundary 2" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'segment_0002')" "/v8/ interior segment dropped" || return 1
-    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'convertv7')" "convertv7 block: 1 seg -> kept" || return 1
-    assert_eq 1 "$(printf '%s\n' "$out" | grep -c '/v7/')" "/v7/ block: 1 seg -> kept" || return 1
-    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "ads9 block: 1 seg -> kept (semantic pattern)" || return 1
-    assert_eq 1 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "promo7 block: 1 seg -> kept (semantic pattern)" || return 1
+    # Standalone video ads are completely dropped; movie segments (including convertv* with watermark) are kept.
+    assert_contains "$out" "convertv8" "convertv8 movie segment with text overlay preserved" || return 1
+    assert_contains "$out" "convertv7" "convertv7 movie segment with text overlay preserved" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "all /v8/ video ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "all /v7/ video ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "all ads9/ video ad lines dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "all promo7/ video ad lines dropped" || return 1
     # Header normalization: VOD injected, DISCONTINUITY-SEQUENCE stripped.
     assert_contains "$out" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
     assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'DISCONTINUITY-SEQUENCE')" "DISCONTINUITY-SEQUENCE stripped" || return 1
@@ -185,6 +181,26 @@ test_hls_strip_ads() {
     for seg in segment_001.ts segment_002.ts segment_003.ts segment_004.ts; do
         assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/$seg" "clean movie segment $seg kept" || return 1
     done
+}
+
+test_hls_strip_preroll_postroll() {
+    local base="https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/index.m3u8"
+    local out
+
+    # Test pre-roll ads: standalone ad segments at start must not inject discontinuity between movie segments 1 and 2
+    out=$(printf '#EXTM3U\n#EXTINF:5.0,\n/v8/abc/segment_0001.ts\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "preroll ad dropped" || return 1
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'DISCONTINUITY')" "no spurious discontinuity after preroll" || return 1
+    assert_contains "$out" "seg1.ts" "seg1 kept" || return 1
+    assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
+    assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept after preroll" || return 1
+
+    # Test post-roll ads: standalone ad segments at end must not swallow EXT-X-ENDLIST
+    out=$(printf '#EXTM3U\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n#EXTINF:5.0,\n/v8/abc/segment_0002.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
+    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "postroll ad dropped" || return 1
+    assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept after postroll" || return 1
+    assert_contains "$out" "seg1.ts" "seg1 kept" || return 1
+    assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
 }
 
 test_is_cache_fresh() {
@@ -274,18 +290,59 @@ test_save_settings() {
     PLAYER_DEFAULT=vlc
     QUALITY=480
     AD_BLOCK=0
+    AUTO_NEXT=0
     save_settings
     assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
     assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
     assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
+    assert_eq "AUTO_NEXT=0" "$(sed -n 4p "$CONFIG_FILE")" "config auto_next" || return 1
     assert_eq "ophim1" "$(cat "$SOURCE_FILE")" "source file" || return 1
     # Round-trip through load_settings.
-    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1
+    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1 AUTO_NEXT=1
     load_settings
     assert_eq "ophim1" "$API_SOURCE" "roundtrip source" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
     assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
+    assert_eq 0 "$AUTO_NEXT" "roundtrip auto_next" || return 1
+}
+
+test_toggle_auto_next() {
+    sleep() { :; }
+    AUTO_NEXT=1
+    toggle_auto_next >/dev/null
+    assert_eq 0 "$AUTO_NEXT" "auto next toggled to 0" || return 1
+    assert_eq "AUTO_NEXT=0" "$(sed -n 4p "$CONFIG_FILE")" "config file updated to 0" || return 1
+    toggle_auto_next >/dev/null
+    assert_eq 1 "$AUTO_NEXT" "auto next toggled to 1" || return 1
+    assert_eq "AUTO_NEXT=1" "$(sed -n 4p "$CONFIG_FILE")" "config file updated to 1" || return 1
+    unset -f sleep
+}
+
+test_download_episode_vietnamese_name() {
+    local bin="$TEST_HOME/dlbin"
+    mkdir -p "$bin"
+    local dl_args="$TEST_HOME/dl_args"
+    cat > "$bin/yt-dlp" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$dl_args"
+EOF
+    chmod +x "$bin/yt-dlp"
+    sleep() { :; }
+    PATH="$bin:$PATH" download_episode "https://example.com/ep.m3u8" "Frieren: Pháp Sư Tiễn Táng (Phần 2) - Tập 01" >/dev/null
+    wait
+    local recorded
+    recorded=$(cat "$dl_args" 2>/dev/null)
+    assert_contains "$recorded" "Frieren_-_Pháp_Sư_Tiễn_Táng_(Phần_2)_-_Tập_01.mp4" "preserves Vietnamese name" || return 1
+    unset -f sleep
+}
+
+test_handle_cli_args() {
+    local help_out
+    help_out=$(handle_cli_args -h)
+    assert_contains "$help_out" "Sudachi" "help output" || return 1
+    assert_contains "$help_out" "--search" "help contains search" || return 1
+    assert_contains "$help_out" "--continue" "help contains continue" || return 1
 }
 
 test_check_dependencies() {
@@ -359,11 +416,12 @@ EOF
     clean="$CACHE/$hash-clean.m3u8"
     assert_eq "$clean" "$out" "echoes clean file path" || return 1
     [[ -f "$clean" ]] || { echo "clean file missing: $clean" >&2; return 1; }
-    # Double-ended safe boundary: first+last ad segment of each block kept.
-    assert_eq 2 "$(grep -c 'convertv8' "$clean")" "convertv8 boundary 2 kept (safe-filter)" || return 1
-    assert_eq 0 "$(grep -c 'convertv8/dQp9IHvN-1' "$clean")" "convertv8 interior dropped" || return 1
-    assert_eq 2 "$(grep -c '/v8/' "$clean")" "/v8/ boundary 2 kept (safe-filter)" || return 1
-    assert_eq 0 "$(grep -c 'segment_0002' "$clean")" "/v8/ interior dropped" || return 1
+    # Standalone video commercial segments dropped; convertv* movie scenes preserved.
+    assert_eq 3 "$(grep -c 'convertv8' "$clean")" "convertv8 movie lines preserved" || return 1
+    assert_eq 0 "$(grep -c '/v8/' "$clean")" "/v8/ ad lines dropped" || return 1
+    assert_eq 0 "$(grep -c '/v7/' "$clean")" "/v7/ ad lines dropped" || return 1
+    assert_eq 0 "$(grep -c 'ads9/' "$clean")" "ads9 ad lines dropped" || return 1
+    assert_eq 0 "$(grep -c 'promo7/' "$clean")" "promo7 ad lines dropped" || return 1
     assert_contains "$(cat "$clean")" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
     assert_eq 0 "$(grep -c 'DISCONTINUITY-SEQUENCE' "$clean")" "DISCONTINUITY-SEQUENCE stripped" || return 1
     local bad
@@ -461,6 +519,7 @@ EOF
     local first
     first=$(head -1 "$argsfile")
     assert_contains "$first" "-clean.m3u8" "mpv receives clean playlist" || return 1
+    assert_contains "$(cat "$argsfile")" "--save-position-on-quit" "mpv saves position on quit" || return 1
     assert_contains "$(cat "$argsfile")" "--cache=yes" "mpv gets --cache=yes" || return 1
     # Local cleaned playlist needs the hls demuxer + widened protocol whitelist
     # (ffmpeg refuses https segments with the default file,crypto,data list).
@@ -469,7 +528,6 @@ EOF
     # Anti-framedrop flags for DISCONTINUITY splice points.
     assert_contains "$(cat "$argsfile")" "--hr-seek-framedrop=no" "mpv disables framedrop at seek" || return 1
     assert_contains "$(cat "$argsfile")" "--demuxer-readahead-secs=20" "mpv readahead for smooth splice" || return 1
-    assert_contains "$(cat "$argsfile")" "--initial-audio-sync=no" "mpv keeps audio continuous at splice" || return 1
     # Seekable RAM cache: seeks inside the buffer never hit the demuxer, so
     # PTS gaps left by ad removal cannot reset playback to the start.
     assert_contains "$(cat "$argsfile")" "--demuxer-seekable-cache=yes" "mpv enables seekable cache" || return 1
@@ -506,6 +564,72 @@ EOF
     local first
     first=$(head -1 "$argsfile")
     assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives original url" || return 1
+}
+
+test_toggle_ad_block() {
+    sleep() { :; }
+    AD_BLOCK=1
+    toggle_ad_block >/dev/null
+    assert_eq 0 "$AD_BLOCK" "ad block toggled to 0" || return 1
+    assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config file updated to 0" || return 1
+    toggle_ad_block >/dev/null
+    assert_eq 1 "$AD_BLOCK" "ad block toggled to 1" || return 1
+    assert_eq "AD_BLOCK=1" "$(sed -n 3p "$CONFIG_FILE")" "config file updated to 1" || return 1
+    unset -f sleep
+}
+
+test_play_video_disabled_ad_block() {
+    # When AD_BLOCK=0, play_video must skip hls_fetch_clean and pass raw URL to mpv.
+    local bin="$TEST_HOME/playbin-disabled"
+    mkdir -p "$bin"
+    local argsfile="$TEST_HOME/mpv-args-disabled"
+    : > "$argsfile"
+    cat > "$bin/mpv" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$argsfile"
+EOF
+    chmod +x "$bin/mpv"
+
+    local curlbin="$TEST_HOME/playbin-curl-disabled"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+echo "curl should not be called when ad block is off" >&2
+exit 1
+EOF
+    chmod +x "$curlbin/curl"
+
+    AD_BLOCK=0
+    PLAYER_DEFAULT=mpv
+    QUALITY=
+    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
+    local i=0
+    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
+    local first
+    first=$(head -1 "$argsfile")
+    assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives raw url when ad block disabled" || return 1
+}
+
+test_history_select() {
+    local recorded=""
+    play_video() { recorded="$1|$2"; }
+    echo "1700000000|Frieren - Tập 01|frieren-slug|https://example.com/stream.m3u8" > "$HIST"
+    fzf() { head -1; }
+    history
+    assert_eq "https://example.com/stream.m3u8|Frieren - Tập 01" "$recorded" "history plays correct url and title" || return 1
+}
+
+test_favorites_select() {
+    local recorded_slug="" recorded_title=""
+    watch_episode() { recorded_slug="$1"; recorded_title="$2"; }
+    echo "1700000000|Frieren|frieren-slug|2024|/poster.jpg" > "$FAV"
+    fzf() {
+        printf 'enter\n'
+        head -1
+    }
+    favorites
+    assert_eq "frieren-slug" "$recorded_slug" "favorites extracts clean slug" || return 1
+    assert_eq "Frieren" "$recorded_title" "favorites extracts clean title" || return 1
 }
 
 # Fake curl for call_api tests: responds with fixture JSON and counts calls.
@@ -587,15 +711,23 @@ TESTS=(
     hash_url
     hls_absolutize_url
     hls_strip_ads
+    hls_strip_preroll_postroll
     hls_fetch_clean_ok
     hls_fetch_clean_fallback
     hls_fetch_clean_canary
     play_video_cleans_url
+    play_video_disabled_ad_block
     play_video_fallback_url
+    toggle_ad_block
+    toggle_auto_next
+    download_episode_vietnamese_name
+    handle_cli_args
     is_cache_fresh
     record_history
+    history_select
     record_progress
     add_favorite
+    favorites_select
     remove_favorite
     load_settings
     save_settings
