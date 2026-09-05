@@ -121,26 +121,53 @@ add_list_numbers() {
     awk '{printf "%d. |%s\n", NR, $0}'
 }
 
+format_movie_items() {
+    awk -F'|' '
+    {
+        name = $1
+        tag = $2
+        country = $3
+        ep = $4
+        slug = $5
+        poster = $6
+
+        display_tag = ""
+        if (tag != "" && tag != "N/A") {
+            display_tag = "  \033[0;34m·\033[0m  \033[0;35m" tag "\033[0m"
+        }
+        if (ep != "" && ep != "N/A" && ep !~ /^(0|null)$/) {
+            display_tag = display_tag "  \033[0;36m[" ep "]\033[0m"
+        }
+
+        display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m%s\033[0m%s", NR, name, display_tag)
+        printf "%s|%s|%s|%s|%s|%s|%s\n", display, name, tag, country, ep, slug, poster
+    }'
+}
+
 FZF_OPTS=(
-    "--border=bold"
-    "--margin=2%,8%,3%,8%"
-    "--padding=1,2"
+    "--ansi"
+    "--border=rounded"
+    "--border-label= 🍙 Sudachi "
+    "--border-label-pos=2"
+    "--margin=1,2"
+    "--padding=0,1"
     "--layout=reverse-list"
     "--info=inline"
-    "--preview-window=right:45%:border-bold"
+    "--preview-window=right:50%:rounded:wrap"
+    "--preview-label= 󰟴 Chi tiết "
 
-    "--pointer=█"
-    "--marker=✓"
+    "--pointer=❯ "
+    "--marker=● "
     "--ellipsis=…"
 
     "--color=bg:-1,bg+:-1,gutter:-1"
-    "--color=fg:7,fg+:14"
-    "--color=hl:1,hl+:3"
-    "--color=border:8,label:14"
-    "--color=prompt:4,pointer:14,marker:2"
-    "--color=spinner:10,info:8,header:5"
-    "--color=preview-fg:7,preview-border:8,preview-scrollbar:8"
-    "--color=query:7"
+    "--color=fg:7,fg+:15"
+    "--color=hl:178,hl+:220"
+    "--color=border:239,label:75"
+    "--color=prompt:81,pointer:81,marker:149"
+    "--color=spinner:114,info:244,header:111"
+    "--color=preview-fg:7,preview-border:239,preview-label:75,preview-scrollbar:239"
+    "--color=query:15"
 )
 
 
@@ -571,11 +598,11 @@ view_downloads() {
         [[ -z "$pid" ]] && continue
         local status
         if kill -0 "$pid" 2>/dev/null; then
-            status="[Đang tải]"
+            status="\033[1;33m[󰑈 Đang tải]\033[0m"
         elif grep -qi "100%" "$log" 2>/dev/null || [[ -s "$DL/$file" ]]; then
-            status="[Hoàn tất]"
+            status="\033[1;32m[󰄲 Hoàn tất]\033[0m"
         else
-            status="[Đã dừng]"
+            status="\033[0;90m[󰅚 Đã dừng]\033[0m"
         fi
         list="${status} ${title}|${log}"$'\n'"$list"
     done < "$task_file"
@@ -585,7 +612,8 @@ view_downloads() {
     local chon
     chon=$(echo -e "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="TẢI PHIM > " \
-        --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:60%:wrap)
+        --header=" 󰌑 Xem tác vụ tải  │  Xem log tiến độ bên dưới  │  Esc Quay lại " \
+        --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:55%:rounded:wrap)
     [[ -z "$chon" ]] && return
 }
 
@@ -702,17 +730,67 @@ create_preview_script() {
 
     cat > "$script" << EOF
 #!/bin/bash
-IFS='|' read -r ten nam quocgia trangthai slug anh <<< "\$1"
-ten=\$(echo "\$ten" | sed 's/^[0-9]*\. //')
+IFS='|' read -ra parts <<< "\$1"
 source="$API_SOURCE"
 
-echo -e "\033[1;36m  \${ten}\033[0m"
-echo -e "\033[1;30m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
-echo ""
-[[ -n "\$nam" && "\$nam" != "null" ]] && echo -e "  \033[0;35m󰃰 Năm:\033[0m \$nam"
-[[ -n "\$quocgia" && "\$quocgia" != "null" ]] && echo -e "  \033[0;36m󰇧 Quốc gia:\033[0m \$quocgia"
-[[ -n "\$trangthai" && "\$trangthai" != "null" ]] && echo -e "  \033[0;36m󱖫 Trạng thái:\033[0m \$trangthai"
+if [[ \${#parts[@]} -ge 7 ]]; then
+    ten="\${parts[1]}"
+    nam="\${parts[2]}"
+    quocgia="\${parts[3]}"
+    trangthai="\${parts[4]}"
+    slug="\${parts[5]}"
+    anh="\${parts[6]}"
+else
+    ten="\${parts[0]}"
+    nam="\${parts[1]}"
+    quocgia="\${parts[2]}"
+    trangthai="\${parts[3]}"
+    slug="\${parts[4]}"
+    anh="\${parts[5]}"
+    ten=\$(echo "\$ten" | sed 's/^[0-9]*\. //')
+fi
 
+origin_name=""
+time_dur=""
+cats=""
+clean_content=""
+
+if [[ -n "\$slug" && "\$slug" != "null" ]]; then
+    desc_cache="$CACHE/desc"
+    mkdir -p "\$desc_cache"
+    detail_cache="\$desc_cache/\${slug}.json"
+
+    if [[ -f "\$detail_cache" ]]; then
+        detail_res=\$(cat "\$detail_cache")
+    else
+        detail_res=\$(curl -fsS --max-time 2 "${api_base}/phim/\${slug}" 2>/dev/null)
+        [[ -n "\$detail_res" ]] && printf '%s' "\$detail_res" > "\$detail_cache"
+    fi
+
+    if [[ -n "\$detail_res" ]]; then
+        origin_name=\$(jq -r '.movie.origin_name // ""' <<< "\$detail_res" 2>/dev/null)
+        time_dur=\$(jq -r '.movie.time // ""' <<< "\$detail_res" 2>/dev/null)
+        cats=\$(jq -r '[.movie.category[]?.name] | join(", ")' <<< "\$detail_res" 2>/dev/null)
+        raw_content=\$(jq -r '.movie.content // ""' <<< "\$detail_res" 2>/dev/null)
+        clean_content=\$(printf '%s' "\$raw_content" | sed -E 's/<[^>]+>/ /g' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
+fi
+
+# Kích thước khung preview động
+cols="\${FZF_PREVIEW_COLUMNS:-80}"
+wrap_w=\$(( cols - 6 ))
+[[ \$wrap_w -lt 35 ]] && wrap_w=35
+div=\$(printf '─%.0s' \$(seq 1 "\$wrap_w"))
+
+poster_h=\$(( cols * 18 / 100 ))
+[[ \$poster_h -lt 12 ]] && poster_h=12
+[[ \$poster_h -gt 17 ]] && poster_h=17
+
+# 1. Header Thẻ Phim
+echo -e "  \033[1;36m󰟴 \${ten}\033[0m"
+[[ -n "\$origin_name" && "\$origin_name" != "null" ]] && echo -e "  \033[0;90m󰑈 \${origin_name}\033[0m"
+
+# 2. Poster Image (Căn giữa ngang chính xác trên mọi terminal)
 img_url="\$anh"
 if [[ "\$source" == "ophim1" && -n "\$slug" ]]; then
     img_res=\$(curl -fsS --max-time 3 "${API_OPHIM1}/v1/api/phim/\${slug}/images" 2>/dev/null)
@@ -730,41 +808,63 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
             xterm-kitty|kitty*) chafa_fmt="kitty" ;;
             foot*|contour|mlterm*|yaft*) chafa_fmt="sixel" ;;
         esac
-        curl -fsS --max-time 5 "\$img_url" 2>/dev/null | chafa -f "\$chafa_fmt" -s 35x18 - 2>/dev/null &
-        wait
+        if [[ -n "\$KITTY_WINDOW_ID" || -n "\$GHOSTTY_RESOURCES_DIR" ]]; then
+            chafa_fmt="kitty"
+        fi
+        echo ""
+        [[ "\$chafa_fmt" == "kitty" ]] && printf '\033_Ga=d,d=A\033\\'
+
+        cache_key="\${slug:-\$(printf '%s' "\$img_url" | md5sum | cut -d' ' -f1)}"
+        img_cache="\$desc_cache/\${cache_key}.img"
+        if [[ ! -s "\$img_cache" ]]; then
+            curl -fsS --max-time 4 "\$img_url" -o "\$img_cache" 2>/dev/null
+            [[ ! -s "\$img_cache" ]] && rm -f "\$img_cache"
+        fi
+
+        if [[ -s "\$img_cache" ]]; then
+            target_cols="\$cols"
+            target_px_w=\$(( target_cols * 10 ))
+            target_px_h=\$(( poster_h * 20 ))
+
+            if command -v magick &>/dev/null; then
+                magick "\$img_cache[0]" -resize "x\${target_px_h}>" -background none -gravity center -extent "\${target_px_w}x\${target_px_h}" png:- 2>/dev/null | chafa -f "\$chafa_fmt" --probe off -s "\${target_cols}x\${poster_h}" - 2>/dev/null &
+            elif command -v convert &>/dev/null; then
+                convert "\$img_cache[0]" -resize "x\${target_px_h}>" -background none -gravity center -extent "\${target_px_w}x\${target_px_h}" png:- 2>/dev/null | chafa -f "\$chafa_fmt" --probe off -s "\${target_cols}x\${poster_h}" - 2>/dev/null &
+            elif command -v ffmpeg &>/dev/null; then
+                ffmpeg -loglevel quiet -i "\$img_cache" -vf "scale=-1:\${target_px_h},pad=\${target_px_w}:\${target_px_h}:(ow-iw)/2:(oh-ih)/2:color=black@0" -c:v png -f image2 pipe:1 2>/dev/null | chafa -f "\$chafa_fmt" --probe off -s "\${target_cols}x\${poster_h}" - 2>/dev/null &
+            else
+                chafa -f "\$chafa_fmt" --probe off -s "\${wrap_w}x\${poster_h}" --align center "\$img_cache" 2>/dev/null &
+            fi
+            wait
+
+            if [[ "\$chafa_fmt" == "kitty" ]]; then
+                for ((i=1; i<poster_h; i++)); do
+                    echo ""
+                done
+            fi
+        fi
     fi
 fi
 
-if [[ -n "\$slug" && "\$slug" != "null" ]]; then
-    desc_cache="$CACHE/desc"
-    mkdir -p "\$desc_cache"
-    desc_file="\$desc_cache/\${slug}.txt"
+# 3. Khối Thông Tin Chi Tiết (Tự động chia 2 cột nếu khung rộng)
+echo -e "  \033[0;90m\${div}\033[0m"
+if [[ \$cols -ge 65 ]]; then
+    printf "  \033[0;33m󰃰 Năm:\033[0m %-26s \033[0;32m󱎫 Thời lượng:\033[0m %s\n" "\${nam:-N/A}" "\${time_dur:-N/A}"
+    printf "  \033[0;36m󰇧 Quốc gia:\033[0m %-25s \033[0;35m󱖫 Trạng thái:\033[0m %s\n" "\${quocgia:-N/A}" "\${trangthai:-N/A}"
+    [[ -n "\$cats" && "\$cats" != "null" ]] && echo -e "  \033[0;34m󰘯 Thể loại:\033[0m \$cats"
+else
+    [[ -n "\$nam" && "\$nam" != "null" ]] && echo -e "  \033[0;33m󰃰 Năm:\033[0m \$nam"
+    [[ -n "\$quocgia" && "\$quocgia" != "null" ]] && echo -e "  \033[0;36m󰇧 Quốc gia:\033[0m \$quocgia"
+    [[ -n "\$time_dur" && "\$time_dur" != "null" ]] && echo -e "  \033[0;32m󱎫 Thời lượng:\033[0m \$time_dur"
+    [[ -n "\$trangthai" && "\$trangthai" != "null" ]] && echo -e "  \033[0;35m󱖫 Trạng thái:\033[0m \$trangthai"
+    [[ -n "\$cats" && "\$cats" != "null" ]] && echo -e "  \033[0;34m󰘯 Thể loại:\033[0m \$cats"
+fi
 
-    if [[ -f "\$desc_file" ]]; then
-        cat "\$desc_file"
-    else
-        detail_res=\$(curl -fsS --max-time 2 "${api_base}/phim/\${slug}" 2>/dev/null)
-        if [[ -n "\$detail_res" ]]; then
-            origin_name=\$(jq -r '.movie.origin_name // ""' <<< "\$detail_res" 2>/dev/null)
-            time_dur=\$(jq -r '.movie.time // ""' <<< "\$detail_res" 2>/dev/null)
-            cats=\$(jq -r '[.movie.category[]?.name] | join(", ")' <<< "\$detail_res" 2>/dev/null)
-            raw_content=\$(jq -r '.movie.content // ""' <<< "\$detail_res" 2>/dev/null)
-            clean_content=\$(printf '%s' "\$raw_content" | sed -E 's/<[^>]+>/ /g' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-            {
-                echo ""
-                [[ -n "\$origin_name" && "\$origin_name" != "null" ]] && echo -e "  \033[0;33m󰑈 Tên gốc:\033[0m \$origin_name"
-                [[ -n "\$time_dur" && "\$time_dur" != "null" ]] && echo -e "  \033[0;32m󱎫 Thời lượng:\033[0m \$time_dur"
-                [[ -n "\$cats" && "\$cats" != "null" ]] && echo -e "  \033[0;34m󰘯 Thể loại:\033[0m \$cats"
-                if [[ -n "\$clean_content" && "\$clean_content" != "null" ]]; then
-                    echo ""
-                    echo -e "  \033[1;37m󰧭 Tóm tắt:\033[0m"
-                    printf '%s\n' "\$clean_content" | fold -s -w 40 | sed 's/^/   /'
-                fi
-            } > "\$desc_file"
-            cat "\$desc_file"
-        fi
-    fi
+# 4. Tóm Tắt Nội Dung Phim (Trải rộng toàn bộ khung preview)
+if [[ -n "\$clean_content" && "\$clean_content" != "null" ]]; then
+    echo -e "  \033[0;90m\${div}\033[0m"
+    echo -e "  \033[1;33m󰧭 Nội dung tóm tắt:\033[0m"
+    printf '%s\n' "\$clean_content" | fold -s -w "\$wrap_w" | sed 's/^/   /'
 fi
 EOF
     chmod +x "$script"
@@ -841,10 +941,10 @@ watch_episode() {
         data=""
 
         chon=$(fzf "${FZF_OPTS[@]}" \
-            --header="󰟴 $ten${continue_header:+  │  }${continue_header}" --prompt="CHỌN TẬP > " \
+            --header="󰟴 $ten${continue_header:+  │  }${continue_header}  │  󰌑 Xem  │  󰌒 Tải (Tab)  │  󰋑 Lưu (Ctrl+F)" \
+            --prompt="CHỌN TẬP > " \
             --delimiter='|' --with-nth=1 \
-            --preview="echo 'Enter: Xem | Tab: Tải | Ctrl-F: Lưu'" \
-            --preview-window=top:3:wrap --expect=enter,tab,ctrl-f <<< "$ds_tap")
+            --expect=enter,tab,ctrl-f <<< "$ds_tap")
         [[ -z "$chon" ]] && break
 
         IFS= read -r phim <<< "$chon"
@@ -925,17 +1025,22 @@ show_list() {
     local preview
     preview=$(create_preview_script) || { show_error "Không tạo được preview"; return; }
 
-        local chon=$(add_menu_numbers <<< "$items" | fzf "${FZF_OPTS[@]}" \
-            --delimiter='|' --with-nth=1,2 \
-            --preview="$preview {}" --preview-window=right:45%:wrap \
-            --prompt="$prompt > ")
+    local formatted
+    formatted=$(format_movie_items <<< "$items")
+
+    local chon
+    chon=$(fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth='{1}' \
+        --preview="$preview {}" \
+        --header=" 󰌑 Chọn xem phim  │  Esc Quay lại " \
+        --prompt="$prompt > " <<< "$formatted")
 
     rm -f "$preview"
 
     if [[ -n "$chon" ]]; then
         local arr=()
         IFS='|' read -ra arr <<< "$chon"
-        watch_episode "${arr[4]}" "${arr[0]#*. }"
+        watch_episode "${arr[5]}" "${arr[1]}"
     fi
 }
 
@@ -959,12 +1064,16 @@ show_paginated_list() {
             return
         fi
 
-        local output=$(add_menu_numbers <<< "$items" | fzf "${FZF_OPTS[@]}" \
-            --delimiter='|' --with-nth=1,2 \
-            --preview="$preview {}" --preview-window=right:45%:wrap \
-            --header="$prompt - Trang $page  |  ← → Chuyển trang" \
+        local formatted
+        formatted=$(format_movie_items <<< "$items")
+
+        local output
+        output=$(fzf "${FZF_OPTS[@]}" \
+            --delimiter='|' --with-nth='{1}' \
+            --preview="$preview {}" \
+            --header=" 󰌑 Chọn xem  │  󰁍/󰁔 Trang $page  │  Esc Quay lại " \
             --prompt="$prompt > " \
-            --expect=right,left,enter)
+            --expect=right,left,enter <<< "$formatted")
 
         local key chon
         IFS= read -r key <<< "$output"
@@ -984,7 +1093,7 @@ show_paginated_list() {
                 if [[ -n "$chon" ]]; then
                     local arr=()
                     IFS='|' read -ra arr <<< "$chon"
-                    watch_episode "${arr[4]}" "${arr[0]#*. }"
+                    watch_episode "${arr[5]}" "${arr[1]}"
                 fi
                 return
                 ;;
@@ -1022,7 +1131,19 @@ esac
 res=\$(curl -fsS --max-time 5 "\${base}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
 [[ -z "\$res" ]] && exit 0
 cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null
+echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null | awk -F'|' '
+{
+    name = \$1; tag = \$2; country = \$3; ep = \$4; slug = \$5; poster = \$6
+    display_tag = ""
+    if (tag != "" && tag != "N/A") {
+        display_tag = "  \033[0;34m·\033[0m  \033[0;35m" tag "\033[0m"
+    }
+    if (ep != "" && ep != "N/A" && ep !~ /^(0|null)$/) {
+        display_tag = display_tag "  \033[0;36m[" ep "]\033[0m"
+    }
+    display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m%s\033[0m%s", NR, name, display_tag)
+    printf "%s|%s|%s|%s|%s|%s|%s\n", display, name, tag, country, ep, slug, poster
+}'
 EOF
     chmod +x "$script"
     echo "$script"
@@ -1038,21 +1159,22 @@ search() {
     local initial_input=""
     if [[ -n "$initial_query" ]]; then
         fzf_query_arg=(--query="$initial_query")
-        initial_input=$("$search" "$initial_query" 2>/dev/null | awk '{printf "%d. %s\n", NR, $0}')
+        initial_input=$("$search" "$initial_query" 2>/dev/null)
     fi
 
-    local chon=$(printf '%s\n' "$initial_input" | fzf "${FZF_OPTS[@]}" \
+    local chon
+    chon=$(printf '%s\n' "$initial_input" | fzf "${FZF_OPTS[@]}" \
         "${fzf_query_arg[@]}" \
-        --prompt="󱇒 TÌM > " --header="Nhập từ khóa..." --phony \
-        --delimiter='|' --with-nth=1,2 \
-        --bind "change:reload:sleep 0.2; $search {q} | awk '{printf \"%d. %s\\n\", NR, \$0}' || true" \
-        --preview="$preview {}" --preview-window=right:45%:wrap)
+        --prompt="󱇒 TÌM > " --header=" 󰌑 Chọn xem  │  Nhập từ khóa để tìm kiếm... " --phony \
+        --delimiter='|' --with-nth='{1}' \
+        --bind "change:reload:sleep 0.2; $search {q} || true" \
+        --preview="$preview {}")
 
     rm -f "$search" "$preview"
     if [[ -n "$chon" ]]; then
         local arr=()
         IFS='|' read -ra arr <<< "$chon"
-        watch_episode "${arr[4]}" "${arr[0]#*. }"
+        watch_episode "${arr[5]}" "${arr[1]}"
     fi
 }
 
@@ -1210,7 +1332,17 @@ advanced_filter() {
 history() {
     [[ ! -s "$HIST" ]] && { show_error "Chưa có lịch sử"; return; }
 
-    local chon=$(sort -rn "$HIST" | add_list_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1,3 --prompt="LỊCH SỬ > ")
+    local formatted
+    formatted=$(sort -rn "$HIST" | awk -F'|' '{
+        display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m󰎤 %s\033[0m", NR, $2)
+        printf "%s|%s|%s|%s|%s\n", display, $1, $2, $3, $4
+    }')
+
+    local chon
+    chon=$(fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 \
+        --header=" 󰌑 Xem lại phim  │  Esc Quay lại " \
+        --prompt="LỊCH SỬ > " <<< "$formatted")
     [[ -z "$chon" ]] && return
     local title url
     IFS='|' read -r _ _ title _ url <<< "$chon"
@@ -1231,9 +1363,10 @@ favorites() {
 
     [[ -z "$parsed_favs" ]] && { show_error "Chưa có yêu thích"; return; }
 
-    local chon=$(fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
-        --prompt="YÊU THÍCH > " --expect=enter,ctrl-d \
-        --preview="echo 'Enter: Xem | Ctrl-D: Xóa'" --preview-window=top:2:wrap <<< "$parsed_favs")
+    local chon
+    chon=$(fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
+        --header=" 󰌑 Xem  │  󰆴 Xóa (Ctrl-D)  │  Esc Quay lại " \
+        --prompt="YÊU THÍCH > " --expect=enter,ctrl-d <<< "$parsed_favs")
 
     local phim data
     IFS= read -r phim <<< "$chon"
@@ -1272,9 +1405,10 @@ select_source() {
     local menu="󱃾  Ophim ${st_ophim}${ophim1_mark}|ophim1
 󱃾  PhimAPI ${st_phimapi}${phimapi_mark}|phimapi"
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="NGUỒN > " --height=40% \
-        --header="Chọn nguồn dữ liệu phim")
+        --header=" 󰌑 Chọn nguồn dữ liệu phim  │  Esc Quay lại ")
     [[ -z "$chon" ]] && return
 
     local new_source="${chon#*|}"
@@ -1290,21 +1424,22 @@ select_source() {
 
 select_player() {
     local mpv_mark="" vlc_mark=""
-    local has_mpv=$(command -v mpv &>/dev/null && echo 1 || echo 0)
-    local has_vlc=$(command -v vlc &>/dev/null && echo 1 || echo 0)
+    local has_mpv=0; command -v mpv &>/dev/null && has_mpv=1
+    local has_vlc=0; command -v vlc &>/dev/null && has_vlc=1
 
-    [[ "$PLAYER_DEFAULT" == "mpv" ]] && mpv_mark=" (đang dùng)"
-    [[ "$PLAYER_DEFAULT" == "vlc" ]] && vlc_mark=" (đang dùng)"
+    [[ "$PLAYER_DEFAULT" == "mpv" ]] && mpv_mark=" \033[1;32m(đang dùng)\033[0m"
+    [[ "$PLAYER_DEFAULT" == "vlc" ]] && vlc_mark=" \033[1;32m(đang dùng)\033[0m"
 
     local menu=""
-    [[ $has_mpv -eq 1 ]] && menu+="  MPV${mpv_mark} (Khuyên dùng)|mpv\n"
-    [[ $has_vlc -eq 1 ]] && menu+="  VLC${vlc_mark}|vlc"
+    [[ $has_mpv -eq 1 ]] && menu+="  MPV${mpv_mark} (Khuyên dùng)|mpv\n"
+    [[ $has_vlc -eq 1 ]] && menu+="  VLC${vlc_mark}|vlc"
 
     [[ -z "$menu" ]] && { show_error "Không có trình phát"; return; }
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="TRÌNH PHÁT > " --height=40% \
-        --header="Chọn trình phát mặc định")
+        --header=" 󰌑 Chọn trình phát mặc định  │  Esc Quay lại ")
     [[ -z "$chon" ]] && return
 
     PLAYER_DEFAULT="${chon#*|}"
@@ -1316,20 +1451,21 @@ select_quality() {
     local current_mark_1080="" current_mark_720="" current_mark_480="" current_mark_auto=""
 
     case "$QUALITY" in
-        1080) current_mark_1080=" (đang dùng)" ;;
-        720)  current_mark_720=" (đang dùng)" ;;
-        480)  current_mark_480=" (đang dùng)" ;;
-        *)    current_mark_auto=" (đang dùng)" ;;
+        1080) current_mark_1080=" \033[1;32m(đang dùng)\033[0m" ;;
+        720)  current_mark_720=" \033[1;32m(đang dùng)\033[0m" ;;
+        480)  current_mark_480=" \033[1;32m(đang dùng)\033[0m" ;;
+        *)    current_mark_auto=" \033[1;32m(đang dùng)\033[0m" ;;
     esac
 
-    local menu="  Auto (Tốt nhất)${current_mark_auto}|auto
-  1080p (FHD)${current_mark_1080}|1080
-  720p (HD)${current_mark_720}|720
-  480p (SD)${current_mark_480}|480"
+    local menu="󰎤  Tự động (Chất lượng cao nhất)${current_mark_auto}|auto
+󰎤  1080p (Full HD)${current_mark_1080}|1080
+󰎤  720p (HD)${current_mark_720}|720
+󰎤  480p (SD)${current_mark_480}|480"
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="CHẤT LƯỢNG > " --height=40% \
-        --header="Chọn chất lượng phát")
+        --header=" 󰌑 Chọn độ phân giải mặc định  │  Esc Quay lại ")
     [[ -z "$chon" ]] && return
 
     local selected="${chon#*|}"
@@ -1376,20 +1512,22 @@ toggle_auto_next() {
 
 settings() {
     local ad_status auto_next_status
-    [[ "$AD_BLOCK" == "1" ]] && ad_status="BẬT" || ad_status="TẮT"
-    [[ "$AUTO_NEXT" == "1" ]] && auto_next_status="BẬT" || auto_next_status="TẮT"
+    [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
+    [[ "$AUTO_NEXT" == "1" ]] && auto_next_status="\033[1;32m[BẬT]\033[0m" || auto_next_status="\033[1;31m[TẮT]\033[0m"
 
-    local menu="Chọn Trình Phát ${I_PLAYER}|player
-Đổi Nguồn ${I_SOURCE}|nguon
-Chất Lượng ${I_QUA}|quality
-Chặn Quảng Cáo: ${ad_status} 󰫈 |adblock
-Tự Động Chuyển Tập: ${auto_next_status} 󰫈 |autonext
-Tiến Độ Tải Phim 󰇚 |downloads
-Mở Thư Mục ${I_DIR}|folder
-Xóa Cache ${I_CACHE}|cache"
+    local menu="${I_PLAYER} Chọn Trình Phát Mặc Định|player
+${I_SOURCE} Đổi Nguồn Dữ Liệu|nguon
+${I_QUA} Chất Lượng Video Mặc Định|quality
+󰫈  Chặn Quảng Cáo Video: ${ad_status}|adblock
+󰁔  Tự Động Chuyển Tập: ${auto_next_status}|autonext
+󰇚  Tiến Độ & Quản Lý Tải Phim|downloads
+${I_DIR} Mở Thư Mục Tải Phim|folder
+${I_CACHE} Xóa Bộ Nhớ Đệm (Cache)|cache"
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=40%)
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=45% \
+        --header=" 󰌑 Chọn mục cài đặt  │  Esc Quay lại ")
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
@@ -1442,17 +1580,20 @@ show_banner() {
 main_menu() {
     local menu_items=""
 
-    menu_items+="Tìm Kiếm ${I_SEARCH}\n"
-    menu_items+="Phim Mới ${I_NEW}\n"
-    menu_items+="Duyệt Phim ${I_BROWSE}\n"
-    menu_items+="Anime ${I_ANIME}\n"
-    menu_items+="Lọc Nâng Cao ${I_FILTER}\n"
-    menu_items+="Lịch Sử ${I_HIST}\n"
-    menu_items+="Yêu Thích ${I_FAV}\n"
-    menu_items+="Cài Đặt ${I_SETTINGS}\n"
-    menu_items+="Thoát ${I_EXIT}"
+    menu_items+="${I_SEARCH} Tìm Kiếm Phim\n"
+    menu_items+="${I_NEW} Phim Mới Cập Nhật\n"
+    menu_items+="${I_BROWSE} Duyệt Phim\n"
+    menu_items+="${I_ANIME} Anime & Hoạt Hình\n"
+    menu_items+="${I_FILTER} Lọc Nâng Cao\n"
+    menu_items+="${I_HIST} Lịch Sử Xem\n"
+    menu_items+="${I_FAV} Phim Yêu Thích\n"
+    menu_items+="${I_SETTINGS} Cài Đặt Hệ Thống\n"
+    menu_items+="${I_EXIT} Thoát"
 
-    echo -e "$menu_items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="MENU > " --height=50%
+    echo -e "$menu_items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        --prompt="MENU > " --height=50% \
+        --border-label=" 🍙 Sudachi Menu " --border-label-pos=2 \
+        --header=" 󰌑 Chọn mục  │  Dùng phím số hoặc mũi tên để điều hướng "
 }
 
 handle_cli_args() {

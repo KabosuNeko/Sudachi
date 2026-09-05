@@ -97,6 +97,23 @@ test_add_list_numbers() {
     assert_eq $'1. |a\n2. |b' "$(printf 'a\nb' | add_list_numbers)" "numbering with pipe" || return 1
 }
 
+test_format_movie_items() {
+    local input="Phim Test|2026 [FHD-Vietsub]|Nhật Bản|Tập 10|phim-test|https://img.url/p.jpg"
+    local out
+    out=$(format_movie_items <<< "$input")
+    local field1 field2 field3 field4 field5 field6 field7
+    IFS='|' read -r field1 field2 field3 field4 field5 field6 field7 <<< "$out"
+    assert_contains "$field1" "Phim Test" "display contains title" || return 1
+    assert_contains "$field1" "2026 [FHD-Vietsub]" "display contains tag" || return 1
+    assert_contains "$field1" "[Tập 10]" "display contains ep" || return 1
+    assert_eq "Phim Test" "$field2" "field 2 is clean title" || return 1
+    assert_eq "2026 [FHD-Vietsub]" "$field3" "field 3 is tag" || return 1
+    assert_eq "Nhật Bản" "$field4" "field 4 is country" || return 1
+    assert_eq "Tập 10" "$field5" "field 5 is ep" || return 1
+    assert_eq "phim-test" "$field6" "field 6 is slug" || return 1
+    assert_eq "https://img.url/p.jpg" "$field7" "field 7 is poster" || return 1
+}
+
 test_get_base_url() {
     API_SOURCE=phimapi
     assert_eq "$API_PHIMAPI" "$(get_base_url)" "phimapi" || return 1
@@ -705,6 +722,7 @@ TESTS=(
     sanitize_field
     add_menu_numbers
     add_list_numbers
+    format_movie_items
     get_base_url
     parse_v1_items
     parse_phimapi_v3
