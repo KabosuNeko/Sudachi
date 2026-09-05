@@ -713,7 +713,7 @@ parse_v1_items() {
     # Shared by phimapi and ophim1 — both return the same .data.items[] shape.
     jq -r --arg cdn "$2" '.data.items[] |
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
-        "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\($cdn)/\(.poster_url)"' <<< "$1" 2>/dev/null
+        "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else ($cdn + "/" + (.poster_url // .thumb_url // "")) end)"' <<< "$1" 2>/dev/null
 }
 
 
@@ -792,11 +792,22 @@ echo -e "  \033[1;36m󰟴 \${ten}\033[0m"
 
 # 2. Poster Image (Căn giữa ngang chính xác trên mọi terminal)
 img_url="\$anh"
+if [[ "\$img_url" =~ ^https?://[^/]+/(https?://.*) ]]; then
+    img_url="\${BASH_REMATCH[1]}"
+fi
+
 if [[ "\$source" == "ophim1" && -n "\$slug" ]]; then
     img_res=\$(curl -fsS --max-time 3 "${API_OPHIM1}/v1/api/phim/\${slug}/images" 2>/dev/null)
     if [[ -n "\$img_res" ]]; then
         tmdb_url=\$(echo "\$img_res" | jq -r '(.data.images[] | select(.type=="poster") | .file_path) // .data.images[0].file_path // ""' 2>/dev/null | head -1)
         [[ -n "\$tmdb_url" && "\$tmdb_url" != "null" ]] && img_url="https://image.tmdb.org/t/p/w500\${tmdb_url}"
+    fi
+fi
+
+if [[ -z "\$img_url" || "\$img_url" == "null" ]]; then
+    if [[ -n "\$detail_res" ]]; then
+        detail_poster=\$(jq -r '.movie.poster_url // .movie.thumb_url // ""' <<< "\$detail_res" 2>/dev/null)
+        [[ -n "\$detail_poster" && "\$detail_poster" != "null" ]] && img_url="\$detail_poster"
     fi
 fi
 
@@ -1131,7 +1142,7 @@ esac
 res=\$(curl -fsS --max-time 5 "\${base}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
 [[ -z "\$res" ]] && exit 0
 cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(\$cdn)/\(.poster_url)"' 2>/dev/null | awk -F'|' '
+echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else (\$cdn + "/" + (.poster_url // .thumb_url // "")) end)"' 2>/dev/null | awk -F'|' '
 {
     name = \$1; tag = \$2; country = \$3; ep = \$4; slug = \$5; poster = \$6
     display_tag = ""
