@@ -307,33 +307,18 @@ test_save_settings() {
     PLAYER_DEFAULT=vlc
     QUALITY=480
     AD_BLOCK=0
-    AUTO_NEXT=0
     save_settings
     assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
     assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
     assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
-    assert_eq "AUTO_NEXT=0" "$(sed -n 4p "$CONFIG_FILE")" "config auto_next" || return 1
     assert_eq "ophim1" "$(cat "$SOURCE_FILE")" "source file" || return 1
     # Round-trip through load_settings.
-    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1 AUTO_NEXT=1
+    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1
     load_settings
     assert_eq "ophim1" "$API_SOURCE" "roundtrip source" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
     assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
-    assert_eq 0 "$AUTO_NEXT" "roundtrip auto_next" || return 1
-}
-
-test_toggle_auto_next() {
-    sleep() { :; }
-    AUTO_NEXT=1
-    toggle_auto_next >/dev/null
-    assert_eq 0 "$AUTO_NEXT" "auto next toggled to 0" || return 1
-    assert_eq "AUTO_NEXT=0" "$(sed -n 4p "$CONFIG_FILE")" "config file updated to 0" || return 1
-    toggle_auto_next >/dev/null
-    assert_eq 1 "$AUTO_NEXT" "auto next toggled to 1" || return 1
-    assert_eq "AUTO_NEXT=1" "$(sed -n 4p "$CONFIG_FILE")" "config file updated to 1" || return 1
-    unset -f sleep
 }
 
 test_download_episode_vietnamese_name() {
@@ -737,7 +722,6 @@ TESTS=(
     play_video_disabled_ad_block
     play_video_fallback_url
     toggle_ad_block
-    toggle_auto_next
     download_episode_vietnamese_name
     handle_cli_args
     is_cache_fresh

@@ -12,7 +12,6 @@ CONFIG_FILE="$CONF/config"
 PLAYER_DEFAULT="mpv"
 QUALITY=""
 AD_BLOCK=1
-AUTO_NEXT=1
 LAST_PLAYER_PID=""
 
 mkdir -p "$CONF" "$DL" "$CACHE"
@@ -93,12 +92,6 @@ load_settings() {
                     *) AD_BLOCK=1 ;;
                 esac
                 ;;
-            AUTO_NEXT)
-                case "$value" in
-                    0) AUTO_NEXT=0 ;;
-                    *) AUTO_NEXT=1 ;;
-                esac
-                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -108,7 +101,6 @@ save_settings() {
         printf 'PLAYER_DEFAULT=%s\n' "$PLAYER_DEFAULT"
         printf 'QUALITY=%s\n' "$QUALITY"
         printf 'AD_BLOCK=%s\n' "$AD_BLOCK"
-        printf 'AUTO_NEXT=%s\n' "$AUTO_NEXT"
     } > "$CONFIG_FILE"
     printf '%s\n' "$API_SOURCE" > "$SOURCE_FILE"
 }
@@ -973,51 +965,14 @@ watch_episode() {
 
         case "$phim" in
             enter)
-                while true; do
-                    record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
-                    record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
-                    local tap_label="$tap"
-                    [[ "$tap" =~ ^[0-9]+$ ]] && tap_label="Tập ${tap}"
-                    continue_header="  ▶ Tiếp: ${tap_label}"
+                record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
+                record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
+                local tap_label="$tap"
+                [[ "$tap" =~ ^[0-9]+$ ]] && tap_label="Tập ${tap}"
+                continue_header="  ▶ Vừa xem: ${tap_label}"
 
-                    play_video "$url" "$tieu_de"
-
-                    [[ "$AUTO_NEXT" != "1" ]] && break
-                    [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
-
-                    local next_entry
-                    next_entry=$(awk -F'|' -v cur="$url" '
-                        found { print; exit }
-                        $2 == cur { found = 1 }
-                    ' <<< "$ds_tap")
-
-                    if [[ -z "$next_entry" ]]; then
-                        echo -e "${C_G}  🎉 Bạn đã xem đến tập cuối cùng!${C_R}"
-                        sleep 2
-                        break
-                    fi
-
-                    local next_tap="${next_entry%%|*}"
-                    local next_url="${next_entry#*|}"
-                    local next_label="$next_tap"
-                    [[ "$next_tap" =~ ^[0-9]+$ ]] && next_label="Tập ${next_tap}"
-                    local next_tieu_de="${ten} - ${next_label}"
-
-                    echo ""
-                    echo -e "${C_C}  ▶ Tự động chuyển tiếp: ${next_tieu_de}${C_R}"
-                    echo -e "${C_Y}  (Nhấn 'q' trong 3 giây để dừng)...${C_R}"
-
-                    local stop_key=""
-                    read -r -t 3 -n 1 stop_key 2>/dev/null
-                    echo ""
-                    if [[ "$stop_key" == "q" || "$stop_key" == "Q" ]]; then
-                        break
-                    fi
-
-                    tap="$next_tap"
-                    url="$next_url"
-                    tieu_de="$next_tieu_de"
-                done
+                play_video "$url" "$tieu_de"
+                [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
                 ;;
             tab)
                 download_episode "$url" "$tieu_de"
@@ -1509,28 +1464,14 @@ toggle_ad_block() {
     sleep 1
 }
 
-toggle_auto_next() {
-    if [[ "$AUTO_NEXT" == "1" ]]; then
-        AUTO_NEXT=0
-        echo -e "${C_Y}  Tự động chuyển tập: TẮT${C_R}"
-    else
-        AUTO_NEXT=1
-        echo -e "${C_G}  Tự động chuyển tập: BẬT${C_R}"
-    fi
-    save_settings
-    sleep 1
-}
-
 settings() {
-    local ad_status auto_next_status
+    local ad_status
     [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
-    [[ "$AUTO_NEXT" == "1" ]] && auto_next_status="\033[1;32m[BẬT]\033[0m" || auto_next_status="\033[1;31m[TẮT]\033[0m"
 
     local menu="${I_PLAYER} Chọn Trình Phát Mặc Định|player
 ${I_SOURCE} Đổi Nguồn Dữ Liệu|nguon
 ${I_QUA} Chất Lượng Video Mặc Định|quality
 󰫈  Chặn Quảng Cáo Video: ${ad_status}|adblock
-󰁔  Tự Động Chuyển Tập: ${auto_next_status}|autonext
 󰇚  Tiến Độ & Quản Lý Tải Phim|downloads
 ${I_DIR} Mở Thư Mục Tải Phim|folder
 ${I_CACHE} Xóa Bộ Nhớ Đệm (Cache)|cache"
@@ -1546,7 +1487,6 @@ ${I_CACHE} Xóa Bộ Nhớ Đệm (Cache)|cache"
         nguon)     select_source ;;
         quality)   select_quality ;;
         adblock)   toggle_ad_block ;;
-        autonext)  toggle_auto_next ;;
         downloads) view_downloads ;;
         folder)    thunar "$DL" 2>/dev/null || dolphin "$DL" 2>/dev/null || xdg-open "$DL" ;;
         cache)     clear_cache ;;
