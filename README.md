@@ -1,104 +1,122 @@
 # Sudachi
 
-[![CI](https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml/badge.svg)](https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml)
-
-<p><br/></p>
 <p align="center">
   <img src="https://github.com/user-attachments/assets/55e3eb61-f479-40c1-be9a-6dd0b4c3b400" alt="Sudachi Logo" style="width: 192px" />
 </p>
-<p><br/></p>
+<p align="center">
+  <a href="https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml"><img src="https://github.com/KabosuNeko/sudachi/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
+  <a href="#y%C3%AAu-c%E1%BA%A7u"><img src="https://img.shields.io/badge/platform-Linux-2ea44f.svg" alt="Platform" /></a>
+  <a href="#c%C3%A0i-%C4%91%E1%BA%B7t"><img src="https://img.shields.io/badge/shell-bash-89e051.svg" alt="Bash" /></a>
+</p>
 
-Trình phim/TV/anime phụ đề Việt chạy trong Terminal, dành cho Linux.
+Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim, chọn tập, phát bằng `mpv`/`vlc` — kèm lọc quảng cáo và tải tập về máy.
 
-## Dependencies
+## Điểm chính
 
-**Bắt buộc:** `fzf` + `jq` + `curl` — kèm `mpv` hoặc `vlc` để phát.
+- **Hai nguồn phim**: PhimAPI và OPhim, đổi qua lại trong Cài đặt
+- **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
+- **Tải tập**: `yt-dlp` + `aria2c` đa luồng, thông báo desktop khi xong
+- **Poster trong terminal**: preview bằng `chafa` (Kitty/Sixel)
+- **Lịch sử, yêu thích, xem tiếp**: mở lại đúng tập và đúng chỗ đang xem dở
+- **CLI flags**: tìm nhanh, xem tiếp, phim mới, anime, tiến độ tải
 
-**Khuyến nghị thêm:** `chafa` (poster preview), `yt-dlp` + `aria2c` (tải đa luồng), `notify-send` (thông báo khi tải xong), `ffmpeg` + `ffprobe` (ghép mốc thời gian clip convertv để tua mượt; thiếu vẫn phát bình thường).
+## Yêu cầu
 
-### Cài đặt theo distro
+**Bắt buộc:** `fzf` + `jq` + `curl`, kèm `mpv` (khuyên dùng) hoặc `vlc`.
+
+**Khuyến nghị thêm:**
+
+| Gói | Dùng cho |
+|---|---|
+| `chafa` | Poster preview trong terminal |
+| `yt-dlp` + `aria2c` | Tải tập đa luồng |
+| `notify-send` | Thông báo khi tải xong |
+| `ffmpeg` + `ffprobe` | Ghép mốc thời gian clip tài trợ để tua mượt (thiếu vẫn phát bình thường) |
+
+### Cài theo distro
 
 **Arch**
 ```bash
-sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify
+sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg
 ```
 
 **Debian/Ubuntu**
 ```bash
-sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa
-# yt-dlp từ apt thường bản cũ — hãy cài binary thủ công:
+sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa ffmpeg
+# yt-dlp từ apt thường bản cũ — cài binary thủ công:
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
 
 **Fedora**
 ```bash
-sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify
+sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg
 ```
 
-## Quick start
+## Cài đặt
 
-### Chạy trực tiếp (không cần cài đặt)
+**Chạy trực tiếp (không cần cài):**
 ```bash
 bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"
 ```
 
-### Hoặc thêm alias vào `~/.bashrc`
+**Alias trong `~/.bashrc` / `~/.zshrc` (fish: `~/.config/fish/config.fish`):**
 ```bash
 alias sudachi='bash -c "$(curl -sL https://raw.githubusercontent.com/KabosuNeko/sudachi/main/sudachi.sh)"'
 ```
 
-### Tùy chọn dòng lệnh (CLI Flags)
+## Cách dùng
+
 ```bash
+sudachi                # Mở menu TUI
 sudachi -s "tên phim"  # Tìm kiếm phim trực tiếp
-sudachi -c             # Tiếp tục xem tập gần nhất trong lịch sử
-sudachi -l             # Mở danh sách Phim Mới
-sudachi -a             # Mở danh mục Anime
-sudachi -d             # Xem tiến độ và danh sách tải phim
-sudachi -h             # Hiển thị bảng trợ giúp
+sudachi -c             # Xem tiếp tập gần nhất
+sudachi -l             # Danh sách phim mới
+sudachi -a             # Danh mục anime
+sudachi -d             # Tiến độ và danh sách tải phim
+sudachi -h             # Trợ giúp
 ```
 
-## Hệ thống Phím tắt (episode picker)
+### Phím tắt (chọn tập)
 
 | Phím | Chức năng |
 | :--- | :--- |
-| **Enter** | Phát |
-| **Tab** | Tải xuống (lưu vào `~/Downloads/Sudachi-Downloaded`) |
-| **Ctrl+F** | Thêm vào Yêu thích |
+| **Enter** | Phát tập |
+| **Tab** | Tải tập (`~/Downloads/Sudachi-Downloaded`) |
+| **Ctrl+F** | Thêm vào yêu thích |
 | **Esc** | Quay lại / thoát |
 
 ## Cấu hình
 
-Tự động tạo tại `~/.config/sudachi/`:
-- `config` — player (`mpv`/`vlc`) và chất lượng
-- `source.conf` — tên API source
-- `history.log` — lịch sử xem
-- `favorites.log` — phim yêu thích
-- `progress.log` — tập đang xem dở
-- `cache/` — cache response từ API (bị xoá khi đổi source)
+Tự tạo tại `~/.config/sudachi/`:
 
-## API sources
+| File | Nội dung |
+|---|---|
+| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo |
+| `source.conf` | Nguồn phim đang dùng |
+| `history.log` · `favorites.log` · `progress.log` | Lịch sử xem, yêu thích, tập đang xem dở |
+| `cache/` | Cache API, poster, playlist đã lọc và clip đã ghép (`Cài đặt → Xóa cache` để dọn) |
 
-| Source | Base URL |
-|--------|----------|
+## Nguồn phim
+
+| Nguồn | API |
+|---|---|
 | [PhimAPI](https://phimapi.com) | `https://phimapi.com` |
 | [OPhim](https://ophim.cc) | `https://ophim1.com` |
 
-## Chặn quảng cáo giữa tập (phimapi)
+## Chặn quảng cáo HLS
 
-Khi phát phim từ phimapi, các khối quảng cáo bị chèn giữa tập sẽ được **lọc tự động trước khi phát** — hết ad giữa phim, và tua tới/tua lui hoạt động bình thường.
+Với phim từ phimapi, khối quảng cáo chèn giữa tập được lọc trước khi phát — tua tới/lui không còn nhảy về đầu.
 
-Cách hoạt động:
-- Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7` cùng các biến thể `ads*/`, `promo*/`)
-- **Chất lượng video** (Cài Đặt → Chất Lượng) áp dụng cho cả HLS: mặc định lấy variant độ phân giải cao nhất, chọn 720p sẽ lấy variant ≤ 720p
-- **Các clip `convertv*` chứa cảnh phim thật nhưng bị CDN đặt lại mốc thời gian** (bắt đầu lại từ ~1,48 giây, kèm dấu `DISCONTINUITY`) được ghép liền mạch vào dòng thời gian của phim bằng `ffmpeg` (bản ghép cache trong `cache/segments/`), nhờ đó tua qua đoạn này không còn nhảy cóc hay quay về đầu phim. Máy thiếu `ffmpeg`/`ffprobe` hoặc tải/ghép lỗi thì giữ nguyên playlist kèm dấu `DISCONTINUITY` như trước — phát phim không bao giờ bị gián đoạn
-- Bản đã lọc được cache tại `~/.config/sudachi/cache/<hash>-clean.m3u8`
-- **Tự phát hiện CDN đổi layout ad**: nếu playlist có dấu hiệu quảng cáo (DISCONTINUITY) nhưng không khớp pattern nào, chương trình ghi cảnh báo vào `cache/debug.log` để bạn biết cần cập nhật pattern
-- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; chỉ khi chưa có cache mới phát stream gốc — xem phim không bao giờ bị gián đoạn
-- **Tải phim (Tab) giữ nguyên stream gốc** (có ad) — chỉ lọc khi phát
+- Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`
+- **Chất lượng** (Cài đặt → Chất lượng) chọn đúng variant HLS: mặc định bản cao nhất, chọn 720p sẽ lấy variant ≤ 720p
+- Clip `convertv*` là cảnh phim thật kèm text tài trợ nhưng bị CDN đặt lại mốc thời gian; `ffmpeg` ghép chúng về đúng dòng thời gian phim nên tua qua đoạn này đứng yên. Thiếu `ffmpeg`/`ffprobe` thì giữ nguyên dấu `DISCONTINUITY` — vẫn phát bình thường
+- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
+- Tải phim (Tab) giữ nguyên stream gốc (có ad) — chỉ lọc khi phát
 
 ## Credits
 
-UI: [fzf](https://github.com/junegunn/fzf)
+UI: [fzf](https://github.com/junegunn/fzf) · Phát phim: [mpv](https://mpv.io/) / [VLC](https://www.videolan.org/vlc/)
 
 MIT License.
