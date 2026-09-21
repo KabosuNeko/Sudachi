@@ -3,6 +3,7 @@
 # Usage: bash tests/run_tests.sh
 # Each test runs in an isolated subshell with a fresh HOME and re-sources the
 # (truncated) library, so no test can leak state into another.
+# shellcheck disable=SC1090  # library path is dynamic
 
 set -uo pipefail
 
@@ -91,10 +92,6 @@ test_sanitize_field() {
 
 test_add_menu_numbers() {
     assert_eq $'1. a\n2. b\n3. c' "$(printf 'a\nb\nc' | add_menu_numbers)" "numbering" || return 1
-}
-
-test_add_list_numbers() {
-    assert_eq $'1. |a\n2. |b' "$(printf 'a\nb' | add_list_numbers)" "numbering with pipe" || return 1
 }
 
 test_format_movie_items() {
@@ -220,6 +217,93 @@ test_hls_strip_preroll_postroll() {
     assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
 }
 
+test_hls_pick_variant() {
+    local master='#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+360/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+720/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+1080/index.m3u8'
+    assert_eq "1080/index.m3u8" "$(hls_pick_variant "$master" "")" "auto picks highest" || return 1
+    assert_eq "1080/index.m3u8" "$(hls_pick_variant "$master" "auto")" "auto literal picks highest" || return 1
+    assert_eq "720/index.m3u8" "$(hls_pick_variant "$master" "720")" "720 picks 720" || return 1
+    assert_eq "360/index.m3u8" "$(hls_pick_variant "$master" "480")" "480 falls back to smallest" || return 1
+    assert_eq "720/index.m3u8" "$(hls_pick_variant "$master" "900")" "900 picks 720" || return 1
+    assert_eq "" "$(hls_pick_variant "#EXTM3U" "")" "no variants echoes nothing" || return 1
+}
+
+test_hls_strip_uri_attrs() {
+    local base="https://cdn/x/a/index.m3u8"
+    local out
+    out=$(printf '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="/init/map.mp4"\n#EXTINF:10.0,\nseg1.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
+    assert_contains "$out" 'URI="https://cdn/x/a/key.bin"' "relative key URI absolutized" || return 1
+    assert_contains "$out" 'URI="https://cdn/init/map.mp4"' "root-relative map URI absolutized" || return 1
+    assert_contains "$out" "https://cdn/x/a/seg1.ts" "segment kept + absolutized" || return 1
+}
+
+test_hls_fetch_clean_cache_fallback() {
+    # A failed refetch must reuse the cached cleaned playlist instead of the
+    # raw ad-carrying URL.
+    local curlbin="$TEST_HOME/curlbin-hls-cache"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+    chmod +x "$curlbin/curl"
+
+    local url="https://cdn.example/master.m3u8"
+    local hash clean out
+    hash=$(hash_url "$url")
+    clean="$CACHE/$hash-clean.m3u8"
+    printf '#EXTM3U\n#EXTINF:10,\nhttps://cdn.example/seg.ts\n#EXT-X-ENDLIST\n' > "$clean"
+
+    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
+    assert_eq "$clean" "$out" "refetch failure reuses cached clean playlist" || return 1
+}
+
+test_hls_fetch_clean_quality() {
+    local curlbin="$TEST_HOME/curlbin-hls-quality"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+url="\${@: -1}"
+printf '%s\n' "\$url" >> "$TEST_HOME/curl-requests.log"
+case "\$url" in
+    *master*)
+        cat <<'MASTER'
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+360/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+720/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+1080/index.m3u8
+MASTER
+        ;;
+    *720*|*1080*)
+        cat "$SCRIPT_DIR/fixtures/clean_playlist.m3u8"
+        ;;
+    *)
+        echo "WRONG-VARIANT"
+        ;;
+esac
+EOF
+    chmod +x "$curlbin/curl"
+
+    local url="https://cdn.example/master.m3u8"
+    QUALITY=720
+    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
+    assert_contains "$(cat "$TEST_HOME/curl-requests.log")" "/720/index.m3u8" "720 variant fetched" || return 1
+    assert_eq 0 "$(grep -c 'WRONG-VARIANT' "$TEST_HOME/curl-requests.log" 2>/dev/null || true)" "no other variant fetched" || return 1
+
+    rm -f "$TEST_HOME/curl-requests.log"
+    QUALITY=''
+    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
+    assert_contains "$(cat "$TEST_HOME/curl-requests.log")" "1080/index.m3u8" "auto fetches the highest variant" || return 1
+}
+
 test_is_cache_fresh() {
     local f="$TEST_HOME/fresh.json"
     printf '{}' > "$f"
@@ -313,12 +397,27 @@ test_save_settings() {
     assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
     assert_eq "ophim1" "$(cat "$SOURCE_FILE")" "source file" || return 1
     # Round-trip through load_settings.
-    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY= AD_BLOCK=1
+    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1
     load_settings
     assert_eq "ophim1" "$API_SOURCE" "roundtrip source" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
     assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
+}
+
+test_clear_cache_removes_all() {
+    mkdir -p "$CACHE/desc" "$CACHE/downloads"
+    : > "$CACHE/api.json"
+    : > "$CACHE/foo-clean.m3u8"
+    : > "$CACHE/desc/poster.img"
+    : > "$CACHE/downloads/tasks.log"
+
+    clear_cache >/dev/null
+
+    [[ ! -f "$CACHE/api.json" ]] || { echo "json cache left" >&2; return 1; }
+    [[ ! -f "$CACHE/foo-clean.m3u8" ]] || { echo "clean playlist left" >&2; return 1; }
+    [[ ! -e "$CACHE/desc" ]] || { echo "desc dir left" >&2; return 1; }
+    [[ -f "$CACHE/downloads/tasks.log" ]] || { echo "downloads must survive" >&2; return 1; }
 }
 
 test_download_episode_vietnamese_name() {
@@ -706,7 +805,6 @@ echo ""
 TESTS=(
     sanitize_field
     add_menu_numbers
-    add_list_numbers
     format_movie_items
     get_base_url
     parse_v1_items
@@ -715,13 +813,18 @@ TESTS=(
     hls_absolutize_url
     hls_strip_ads
     hls_strip_preroll_postroll
+    hls_pick_variant
+    hls_strip_uri_attrs
     hls_fetch_clean_ok
     hls_fetch_clean_fallback
+    hls_fetch_clean_cache_fallback
+    hls_fetch_clean_quality
     hls_fetch_clean_canary
     play_video_cleans_url
     play_video_disabled_ad_block
     play_video_fallback_url
     toggle_ad_block
+    clear_cache_removes_all
     download_episode_vietnamese_name
     handle_cli_args
     is_cache_fresh

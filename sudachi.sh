@@ -1,5 +1,4 @@
 #!/bin/bash
-# noqa: SIZE_OK — single-file architecture required by README curl one-liner install
 
 CONF="$HOME/.config/sudachi"
 DL="$HOME/Downloads/Sudachi-Downloaded"
@@ -107,10 +106,6 @@ save_settings() {
 
 add_menu_numbers() {
     awk '{printf "%d. %s\n", NR, $0}'
-}
-
-add_list_numbers() {
-    awk '{printf "%d. |%s\n", NR, $0}'
 }
 
 format_movie_items() {
@@ -264,7 +259,9 @@ hls_absolutize_url() {
 # poisons ffmpeg seek tables) and guarantees #EXT-X-PLAYLIST-TYPE:VOD.
 # Segments resolving into the playlist's own directory are movie content and
 # are never treated as ads, even when they match HLS_AD_PATTERNS.
-# Segment URIs are absolutized directly in awk for high performance.
+# Segment URIs are absolutized directly in awk for high performance, and URI
+# attributes of #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA lines are rewritten the
+# same way so the cached local playlist still references remote keys/maps.
 hls_strip_ads() {
     local base="$1" basedir basehost
     basedir="${base%/*}"
@@ -280,6 +277,15 @@ hls_strip_ads() {
             abs = absolutize(u)
             sub(/\/[^\/]*$/, "", abs)
             return (abs == basedir)
+        }
+        function rewrite_uri(s,   head, rest, uri, abs) {
+            if (!match(s, /URI="[^"]*"/)) return s
+            head = substr(s, 1, RSTART - 1)
+            uri = substr(s, RSTART + 5, RLENGTH - 6)
+            rest = substr(s, RSTART + RLENGTH)
+            abs = uri
+            if (uri != "") abs = absolutize(uri)
+            return head "URI=\"" abs "\"" rest
         }
         {
             if ($0 ~ /^#EXTM3U/) {
@@ -332,15 +338,21 @@ hls_strip_ads() {
 
             # Tag lines inside ad block
             if (in_ad) {
-                if ($0 ~ /^#EXTINF/ || ($0 ~ /^#EXT-X-KEY/ && $0 !~ /METHOD=NONE/)) {
+                if ($0 ~ /^#EXTINF/) {
                     ad_pend[ad_pend_n++] = $0
+                } else if ($0 ~ /^#EXT-X-KEY/ && $0 !~ /METHOD=NONE/) {
+                    ad_pend[ad_pend_n++] = rewrite_uri($0)
                 }
                 next
             }
 
             # Tag lines before movie segments
-            if ($0 ~ /^#EXT-X-DISCONTINUITY$/ || $0 ~ /^#EXT-X-KEY/) {
+            if ($0 ~ /^#EXT-X-DISCONTINUITY$/) {
                 pend[pend_n++] = $0
+                next
+            }
+            if ($0 ~ /^#EXT-X-KEY/) {
+                pend[pend_n++] = rewrite_uri($0)
                 next
             }
             if ($0 ~ /^#EXTINF/) {
@@ -348,10 +360,12 @@ hls_strip_ads() {
                 next
             }
 
-            # Any other line (headers, etc.): flush and pass.
+            # Any other line (headers, EXT-X-MAP/MEDIA/...): flush and pass,
+            # absolutizing any URI attribute so a cached local playlist still
+            # points at remote keys/maps.
             for (i = 0; i < pend_n; i++) print pend[i]
             pend_n = 0
-            print
+            print rewrite_uri($0)
         }
         END {
             for (i = 0; i < pend_n; i++) print pend[i]
@@ -359,34 +373,90 @@ hls_strip_ads() {
     '
 }
 
+# hls_pick_variant <master-playlist> <quality> -- pick the media variant URI
+# from a master playlist. Empty/auto quality picks the highest resolution
+# (then highest bandwidth); a numeric quality picks the largest height that
+# does not exceed it, falling back to the smallest variant. Echoes nothing
+# when the master has no usable variant.
+hls_pick_variant() {
+    awk -v want="$2" '
+        /^#EXT-X-STREAM-INF/ {
+            bw = 0; h = 0
+            if (match($0, /BANDWIDTH=[0-9]+/)) bw = substr($0, RSTART + 10, RLENGTH - 10) + 0
+            if (match($0, /RESOLUTION=[0-9]+x[0-9]+/)) {
+                split(substr($0, RSTART + 11, RLENGTH - 11), wh, "x")
+                h = wh[2] + 0
+            }
+            uri = ""
+            while ((getline line) > 0) {
+                if (line !~ /^#/ && line != "") { uri = line; break }
+            }
+            if (uri != "") { n++; vh[n] = h; vbw[n] = bw; vu[n] = uri }
+        }
+        END {
+            best = 0
+            if (want == "" || want == "auto") {
+                for (i = 1; i <= n; i++)
+                    if (vh[i] > vh[best] || (vh[i] == vh[best] && vbw[i] > vbw[best])) best = i
+            } else {
+                want += 0
+                best = -1
+                for (i = 1; i <= n; i++)
+                    if (vh[i] > 0 && vh[i] <= want && (best < 0 || vh[i] > vh[best])) best = i
+                if (best < 0) {
+                    for (i = 1; i <= n; i++)
+                        if (vh[i] > 0 && (best < 0 || vh[i] < vh[best])) best = i
+                }
+                if (best < 0) best = 0
+            }
+            if (best > 0) print vu[best]
+        }
+    ' <<< "$1"
+}
+
+# hls_fallback_url <clean-file> <original-url> -- prefer an already cleaned
+# cached playlist when a refetch fails (transient CDN/network errors must not
+# silently serve ads); fall back to the original URL when no cache exists.
+hls_fallback_url() {
+    if [[ -s "$1" ]]; then
+        printf '%s' "$1"
+    else
+        printf '%s' "$2"
+    fi
+}
+
 # hls_fetch_clean <url> -- fetch an HLS playlist (master or media), strip ad
 # segments via hls_strip_ads, absolutize segment URIs, cache the result as
-# $CACHE/<hash>-clean.m3u8 and echo its local path. If the fetched playlist is
-# a master (contains #EXT-X-STREAM-INF) the first variant playlist is fetched
-# instead. On ANY failure echoes the original url unchanged and returns 0
-# (silent fallback: playback must never break).
+# $CACHE/<hash>-clean.m3u8 and echo its local path. For a master playlist the
+# variant matching QUALITY is fetched (highest resolution when QUALITY is
+# empty). On a fetch failure the cached cleaned playlist is reused when
+# available; with no cache the original url is echoed unchanged. Always
+# returns 0 (silent fallback: playback must never break).
 hls_fetch_clean() {
-    local url="$1" master variant media out tmp hash
+    local url="$1" master variant media out tmp hash clean
+    hash=$(hash_url "$url")
+    clean="$CACHE/$hash-clean.m3u8"
+
     master=$(curl -fsS --connect-timeout 10 --max-time 10 "$url" 2>/dev/null) || {
-        echo "$url"
+        hls_fallback_url "$clean" "$url"
         return 0
     }
     if printf '%s' "$master" | grep -q '^#EXT-X-STREAM-INF'; then
-        variant=$(printf '%s\n' "$master" | awk '/^#EXT-X-STREAM-INF/{while(getline > 0){if($0 !~ /^#/ && $0 != ""){print; exit}}}')
+        variant=$(hls_pick_variant "$master" "$QUALITY")
         media=$(hls_absolutize_url "$url" "$variant")
     else
         media="$url"
     fi
     [[ -z "$media" ]] && {
-        echo "$url"
+        hls_fallback_url "$clean" "$url"
         return 0
     }
     out=$(curl -fsS --connect-timeout 10 --max-time 10 "$media" 2>/dev/null) || {
-        echo "$url"
+        hls_fallback_url "$clean" "$url"
         return 0
     }
     [[ -z "$out" ]] && {
-        echo "$url"
+        hls_fallback_url "$clean" "$url"
         return 0
     }
     # Canary: many DISCONTINUITY tags but zero ad-pattern matches means the
@@ -396,19 +466,18 @@ hls_fetch_clean() {
        ! printf '%s\n' "$out" | grep -qE "$HLS_AD_PATTERNS"; then
         log_debug "hls_fetch_clean: $media has DISCONTINUITY but no ad-pattern match — HLS_AD_PATTERNS may need updating"
     fi
-    hash=$(hash_url "$url")
     tmp=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp="$CACHE/.tmp-$$.m3u8"
     if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
-        if [[ -s "$tmp" ]] && mv -f "$tmp" "$CACHE/$hash-clean.m3u8" 2>/dev/null; then
-            echo "$CACHE/$hash-clean.m3u8"
+        if [[ -s "$tmp" ]] && mv -f "$tmp" "$clean" 2>/dev/null; then
+            echo "$clean"
         else
             rm -f "$tmp"
-            echo "$url"
+            hls_fallback_url "$clean" "$url"
             return 0
         fi
     else
         rm -f "$tmp"
-        echo "$url"
+        hls_fallback_url "$clean" "$url"
         return 0
     fi
 }
@@ -441,7 +510,8 @@ get_base_url() {
 
 call_api() {
     local endpoint="$1"
-    local base_url=$(get_base_url)
+    local base_url
+    base_url=$(get_base_url)
     local url="${base_url}${endpoint}"
 
 
@@ -557,7 +627,8 @@ download_episode() {
     file="${safe_title:-sudachi_$(date +%s)}.mp4"
 
     mkdir -p "$CACHE/downloads"
-    local log_file="$CACHE/downloads/$(date +%s)_${file}.log"
+    local log_file
+    log_file="$CACHE/downloads/$(date +%s)_${file}.log"
 
     (
         if command -v aria2c >/dev/null 2>&1; then
@@ -1018,7 +1089,8 @@ show_paginated_list() {
     preview=$(create_preview_script) || { show_error "Không tạo được preview"; return; }
 
     while true; do
-        local items=$($fetch_callback "$page")
+        local items
+        items=$($fetch_callback "$page")
 
         if [[ -z "$items" ]]; then
             if [[ $page -gt 1 ]]; then
@@ -1086,6 +1158,8 @@ create_search_script() {
     register_temp "$script"
     cat > "$script" << EOF
 #!/bin/bash
+$(declare -f format_movie_items)
+
 [[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
 q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
 source="$API_SOURCE"
@@ -1097,19 +1171,7 @@ esac
 res=\$(curl -fsS --max-time 5 "\${base}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
 [[ -z "\$res" ]] && exit 0
 cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else (\$cdn + "/" + (.poster_url // .thumb_url // "")) end)"' 2>/dev/null | awk -F'|' '
-{
-    name = \$1; tag = \$2; country = \$3; ep = \$4; slug = \$5; poster = \$6
-    display_tag = ""
-    if (tag != "" && tag != "N/A") {
-        display_tag = "  \033[0;34m·\033[0m  \033[0;35m" tag "\033[0m"
-    }
-    if (ep != "" && ep != "N/A" && ep !~ /^(0|null)$/) {
-        display_tag = display_tag "  \033[0;36m[" ep "]\033[0m"
-    }
-    display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m%s\033[0m%s", NR, name, display_tag)
-    printf "%s|%s|%s|%s|%s|%s|%s\n", display, name, tag, country, ep, slug, poster
-}'
+echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else (\$cdn + "/" + (.poster_url // .thumb_url // "")) end)"' 2>/dev/null | format_movie_items
 EOF
     chmod +x "$script"
     echo "$script"
@@ -1186,7 +1248,8 @@ browse() {
             ;;
     esac
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="DUYỆT > " --height=50%)
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="DUYỆT > " --height=50%)
     [[ -z "$chon" ]] && return
 
     local loai="${chon#*|}"
@@ -1201,48 +1264,28 @@ browse() {
 }
 
 
-filter_by_genre() {
+filter_by_category() {
+    local prompt="$1" endpoint="$2" param="$3"
     show_loading
     local res ds
 
-    res=$(call_api "/the-loai")
+    res=$(call_api "$endpoint")
     [[ -z "$res" ]] && { show_error "Lỗi"; return; }
     ds=$(jq -r '.data.items[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
 
-    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="THỂ LOẠI > ")
+    local chon
+    chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="$prompt > ")
     [[ -z "$chon" ]] && return
 
     local slug="${chon#*|}"
     local ten_raw="${chon%%|*}"
     local ten="${ten_raw#*. }"
 
-    fetch_genre() {
-        fetch_list "danh-sach/phim-moi" "$1" "category=${slug}"
+    fetch_category() {
+        fetch_list "danh-sach/phim-moi" "$1" "${param}=${slug}"
     }
 
-    show_paginated_list "$ten" fetch_genre
-}
-
-filter_by_country() {
-    show_loading
-    local res ds
-
-    res=$(call_api "/quoc-gia")
-    [[ -z "$res" ]] && { show_error "Lỗi"; return; }
-    ds=$(jq -r '.data.items[] | "\(.name)|\(.slug)"' <<< "$res" 2>/dev/null)
-
-    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="QUỐC GIA > ")
-    [[ -z "$chon" ]] && return
-
-    local slug="${chon#*|}"
-    local ten_raw="${chon%%|*}"
-    local ten="${ten_raw#*. }"
-
-    fetch_country() {
-        fetch_list "danh-sach/phim-moi" "$1" "country=${slug}"
-    }
-
-    show_paginated_list "$ten" fetch_country
+    show_paginated_list "$ten" fetch_category
 }
 
 filter_by_year() {
@@ -1253,7 +1296,8 @@ filter_by_year() {
     done
     ds="${ds%$'\n'}"
 
-    local chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
+    local chon
+    chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
     [[ -z "$chon" ]] && return
 
     local nam_chon="${chon#*. }"
@@ -1285,12 +1329,13 @@ advanced_filter() {
   Quốc Gia|quocgia
   Năm|nam"
 
-    local chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="LỌC > " --height=40%)
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="LỌC > " --height=40%)
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
-        theloai) filter_by_genre ;;
-        quocgia) filter_by_country ;;
+        theloai) filter_by_category "THỂ LOẠI" "/the-loai" "category" ;;
+        quocgia) filter_by_category "QUỐC GIA" "/quoc-gia" "country" ;;
         nam)     filter_by_year ;;
     esac
 }
@@ -1380,7 +1425,7 @@ select_source() {
     local new_source="${chon#*|}"
 
     if [[ "$new_source" != "$API_SOURCE" ]]; then
-        rm -f "$CACHE"/*.json
+        purge_api_cache
         log_debug "Cache cleared: source switched from $API_SOURCE to $new_source"
     fi
 
@@ -1440,13 +1485,20 @@ select_quality() {
     save_settings
 }
 
+purge_api_cache() {
+    rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8
+    rm -rf "$CACHE/desc"
+}
+
 clear_cache() {
-    local json_files=("$CACHE"/*.json)
-    local count=0
-    for f in "${json_files[@]}"; do
+    local count=0 f
+    for f in "$CACHE"/*.json "$CACHE"/*-clean.m3u8; do
         [[ -f "$f" ]] && ((count++))
     done
-    rm -f "$CACHE"/*.json
+    if [[ -d "$CACHE/desc" ]]; then
+        count=$((count + $(find "$CACHE/desc" -type f 2>/dev/null | wc -l)))
+    fi
+    purge_api_cache
     log_debug "Cache cleared manually: $count files removed"
     echo -e "${C_G}  Đã xóa ${count} file cache.${C_R}"
     sleep 1

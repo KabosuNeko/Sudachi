@@ -90,9 +90,10 @@ Khi phát phim từ phimapi, các khối quảng cáo bị chèn giữa tập s�
 
 Cách hoạt động:
 - Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7` cùng các biến thể `ads*/`, `promo*/`)
+- **Chất lượng video** (Cài Đặt → Chất Lượng) áp dụng cho cả HLS: mặc định lấy variant độ phân giải cao nhất, chọn 720p sẽ lấy variant ≤ 720p
 - Bản đã lọc được cache tại `~/.config/sudachi/cache/<hash>-clean.m3u8`
 - **Tự phát hiện CDN đổi layout ad**: nếu playlist có dấu hiệu quảng cáo (DISCONTINUITY) nhưng không khớp pattern nào, chương trình ghi cảnh báo vào `cache/debug.log` để bạn biết cần cập nhật pattern
-- Nếu có bất kỳ lỗi nào khi lọc, chương trình **tự phát stream gốc** — xem phim không bao giờ bị gián đoạn
+- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; chỉ khi chưa có cache mới phát stream gốc — xem phim không bao giờ bị gián đoạn
 - **Tải phim (Tab) giữ nguyên stream gốc** (có ad) — chỉ lọc khi phát
 
 ## Credits

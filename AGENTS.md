@@ -2,7 +2,7 @@
 
 ## What this is
 
-A single Bash script (`sudachi.sh`, ~1096 lines) — Vietnamese-subtitled movie/TV/anime player using `fzf` (UI) and `mpv`/`vlc` (playback).
+A single Bash script (`sudachi.sh`) — Vietnamese-subtitled movie/TV/anime player using `fzf` (UI) and `mpv`/`vlc` (playback).
 
 ## Running
 
@@ -38,7 +38,7 @@ No build step. Validate syntax only: `bash -n sudachi.sh`.
 ## Runtime config
 
 Auto-created at `~/.config/sudachi/`:
-- `config` — `PLAYER_DEFAULT` (mpv/vlc) + `QUALITY` (1080/720/480/auto) + `AD_BLOCK` (1/0) + `AUTO_NEXT` (1/0)
+- `config` — `PLAYER_DEFAULT` (mpv/vlc) + `QUALITY` (1080/720/480/auto) + `AD_BLOCK` (1/0)
 - `source.conf` — single line: the API source name (validated against ophim1/phimapi)
 - `history.log`, `favorites.log`, `progress.log` — pipe-delimited records
 - `cache/` — JSON cache per URL hash (3600s TTL)
@@ -46,7 +46,7 @@ Auto-created at `~/.config/sudachi/`:
 
 ## API sources
 
-Source selected at `~/.config/sudachi/source.conf`. **Default: `phimapi`** (hardcoded at line 22, overridden by `source.conf` on startup).
+Source selected at `~/.config/sudachi/source.conf`. **Default: `phimapi`** (global `API_SOURCE` initializer, overridden by `source.conf` on startup).
 
 | Name | Base URL | Response shape | Endpoint path pattern |
 |------|----------|----------------|----------------------|
@@ -77,13 +77,13 @@ Main menu (`main_menu()`) always shows all items regardless of `API_SOURCE`:
 ## Architecture notes
 
 - **No `set -euo pipefail`** — the script runs without strict mode. Guards that check `command -v` or use `&&`/`||` are behavioral, not defensive.
-- **FZF_OPTS** global array at line 117 — all fzf calls reuse it.
-- **Cache**: URL → MD5 hash → JSON file. Fresh for 3600s. Cleared on source switch or manually (`Cài Đặt → Xóa Cache` — only removes `*.json`).
+- **FZF_OPTS** global array — all fzf calls reuse it.
+- **Cache**: URL → MD5 hash → JSON file. Fresh for 3600s. Cleared on source switch or manually (`Cài Đặt → Xóa Cache` — removes API JSON, cached posters/descriptions in `cache/desc/`, and cleaned `*-clean.m3u8` playlists; `downloads/` and `debug.log` stay).
 - **Temp scripts**: `create_preview_script` / `create_search_script` write standalone shell scripts under `$CACHE/`. Cleaned on exit via `trap cleanup EXIT SIGINT SIGTERM`. **URLs must be baked at creation time** — subprocesses have no access to parent shell variables.
 - **Preview script** uses `IFS='|' read -r` on the fzf-selected line (6-field pipe-delimited record). Ophim1 images fall back to TMDB API (`/v1/api/phim/{slug}/images`).
-- **`sanitize_field`** (line 209) normalizes newlines, trims, replaces `|` — used for display fields in pipe-delimited records.
+- **`sanitize_field`** normalizes newlines, trims, replaces `|` — used for display fields in pipe-delimited records.
 - **`log_debug`** appends to `$CACHE/debug.log` (never rotated).
 - **`hash_url`** prefers `md5sum`, falls back to `md5`, `sha256sum`, `cksum`.
-- **HLS ad-stripping** at `play_video()`: guarded by `AD_BLOCK` config (default 1/on, toggled via Cài Đặt → Chặn Quảng Cáo). `.m3u8` URLs pass through `hls_fetch_clean` before playback. Mid-roll and pre/post-roll standalone video ad commercial segments are completely dropped; each ad block is replaced by a single `#EXT-X-DISCONTINUITY` at the splice point so the player resets its PTS timeline correctly without PTS gap stalls. Movie segment metadata (`#EXTINF`) following ad blocks is preserved. Header normalization: `#EXT-X-PLAYLIST-TYPE:VOD` is injected (ffmpeg builds a fixed seek table for VOD, not live) and `#EXT-X-DISCONTINUITY-SEQUENCE` is stripped (its index shifts after ad removal and poisons ffmpeg seek tables). Segments resolving into the playlist's own directory are movie content and are NEVER treated as ads, even if they match `HLS_AD_PATTERNS`. Segment URIs are absolutized directly in awk for high performance. The cleaned playlist is cached as `<hash>-clean.m3u8` in `cache/`; any fetch/filter failure falls back to the raw URL (playback never breaks). `HLS_AD_PATTERNS` (awk ERE, extendable) currently matches standalone video ads: `(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|(^|/)v[0-9]+/[0-9a-f]+/segment_`. Note: `convertv*` segments contain actual movie content with a 2-line sponsor text watermark overlay re-encoded at scene boundaries; these are preserved as movie content to avoid cutting out 20–30s of dialogue. Canary: if a playlist has >=2 DISCONTINUITY tags but zero ad-pattern matches, `hls_fetch_clean` writes a warning to `debug.log` ("HLS_AD_PATTERNS may need updating") so a CDN layout change is noticed instead of silently returning ads. mpv gets `--cache=yes` + `--demuxer-seekable-cache=yes` + `--demuxer-max-bytes=150M` + `--demuxer-max-back-bytes=100M` + `--hr-seek=default` + `--hr-seek-framedrop=no` + `--demuxer-readahead-secs=20` for HLS (seekable RAM cache serves backward seeks from memory so PTS gaps left by ad removal can never reset playback to the start; never `--force-seekable=yes` — breaks HLS, mpv#11990; default initial audio sync keeps A-V perfectly synchronized across discontinuities; do NOT use `--initial-audio-sync=no` as it causes audio desync); for the local cleaned playlist mpv additionally forces `--demuxer-lavf-format=hls` + a widened `protocol_whitelist` (ffmpeg refuses https segments with the default file,crypto,data list — stalls every few seconds). Do NOT add `--demuxer-lavf-linearize-timestamps=yes` — it rewrites the timeline one-way and breaks backward seek across the PTS jumps left by removed ad segments. Downloads keep the raw stream.
+- **HLS ad-stripping** at `play_video()`: guarded by `AD_BLOCK` config (default 1/on, toggled via Cài Đặt → Chặn Quảng Cáo). `.m3u8` URLs pass through `hls_fetch_clean` before playback. Mid-roll and pre/post-roll standalone video ad commercial segments are completely dropped; each ad block is replaced by a single `#EXT-X-DISCONTINUITY` at the splice point so the player resets its PTS timeline correctly without PTS gap stalls. Movie segment metadata (`#EXTINF`) following ad blocks is preserved. Header normalization: `#EXT-X-PLAYLIST-TYPE:VOD` is injected (ffmpeg builds a fixed seek table for VOD, not live) and `#EXT-X-DISCONTINUITY-SEQUENCE` is stripped (its index shifts after ad removal and poisons ffmpeg seek tables). Segments resolving into the playlist's own directory are movie content and are NEVER treated as ads, even if they match `HLS_AD_PATTERNS`. Segment URIs are absolutized directly in awk for high performance, and URI attributes of `#EXT-X-KEY` / `#EXT-X-MAP` / `#EXT-X-MEDIA` lines are rewritten the same way (the cached playlist is local, so relative keys/maps would 404). The cleaned playlist is cached as `<hash>-clean.m3u8` in `cache/`; a fetch/filter failure falls back to the cached cleaned playlist when one exists (a transient refetch error must not silently serve ads) and only then to the raw URL (playback never breaks). `HLS_AD_PATTERNS` (awk ERE, extendable) currently matches standalone video ads: `(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|(^|/)v[0-9]+/[0-9a-f]+/segment_`. Note: `convertv*` segments contain actual movie content with a 2-line sponsor text watermark overlay re-encoded at scene boundaries; these are preserved as movie content to avoid cutting out 20–30s of dialogue. Canary: if a playlist has >=2 DISCONTINUITY tags but zero ad-pattern matches, `hls_fetch_clean` writes a warning to `debug.log` ("HLS_AD_PATTERNS may need updating") so a CDN layout change is noticed instead of silently returning ads. For master playlists the variant matching `QUALITY` is fetched (highest resolution when QUALITY is auto/empty) via `hls_pick_variant`. mpv gets `--cache=yes` + `--demuxer-seekable-cache=yes` + `--demuxer-max-bytes=150M` + `--demuxer-max-back-bytes=100M` + `--hr-seek=default` + `--hr-seek-framedrop=no` + `--demuxer-readahead-secs=20` for HLS (seekable RAM cache serves backward seeks from memory so PTS gaps left by ad removal can never reset playback to the start; never `--force-seekable=yes` — breaks HLS, mpv#11990; default initial audio sync keeps A-V perfectly synchronized across discontinuities; do NOT use `--initial-audio-sync=no` as it causes audio desync); for the local cleaned playlist mpv additionally forces `--demuxer-lavf-format=hls` + a widened `protocol_whitelist` (ffmpeg refuses https segments with the default file,crypto,data list — stalls every few seconds). Do NOT add `--demuxer-lavf-linearize-timestamps=yes` — it rewrites the timeline one-way and breaks backward seek across the PTS jumps left by removed ad segments. Downloads keep the raw stream.
 - **All UI text is Vietnamese** (labels, error messages, comments). English only in code comments.
-- **Single branch (`main`)**, single contributor. No tests, no CI, no formatter.
+- **Single branch (`main`)**, single contributor. Tests: `bash tests/run_tests.sh` (38 cases). CI runs `bash -n`, `shellcheck -S warning` (both files), and the test suite. No formatter yet.

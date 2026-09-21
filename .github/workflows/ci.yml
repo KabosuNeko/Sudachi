@@ -27,7 +27,7 @@ jobs:
 
       - name: ShellCheck linter
         run: |
-          shellcheck -S error sudachi.sh tests/run_tests.sh
+          shellcheck -S warning sudachi.sh tests/run_tests.sh
 
       - name: Run test suite
         run: |
