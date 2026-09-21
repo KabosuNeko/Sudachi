@@ -406,17 +406,19 @@ test_save_settings() {
 }
 
 test_clear_cache_removes_all() {
-    mkdir -p "$CACHE/desc" "$CACHE/downloads"
+    mkdir -p "$CACHE/desc" "$CACHE/downloads" "$CACHE/segments"
     : > "$CACHE/api.json"
     : > "$CACHE/foo-clean.m3u8"
     : > "$CACHE/desc/poster.img"
     : > "$CACHE/downloads/tasks.log"
+    : > "$CACHE/segments/abc-r.ts"
 
     clear_cache >/dev/null
 
     [[ ! -f "$CACHE/api.json" ]] || { echo "json cache left" >&2; return 1; }
     [[ ! -f "$CACHE/foo-clean.m3u8" ]] || { echo "clean playlist left" >&2; return 1; }
     [[ ! -e "$CACHE/desc" ]] || { echo "desc dir left" >&2; return 1; }
+    [[ ! -e "$CACHE/segments" ]] || { echo "segments dir left" >&2; return 1; }
     [[ -f "$CACHE/downloads/tasks.log" ]] || { echo "downloads must survive" >&2; return 1; }
 }
 
@@ -576,6 +578,152 @@ EOF
     local url="https://cdn.example/master.m3u8"
     PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
     assert_contains "$(cat "$CACHE/debug.log" 2>/dev/null)" "HLS_AD_PATTERNS may need updating" "canary flags unmatched ad layout" || return 1
+}
+
+test_hls_rebase_convertv_rewrites_playlist() {
+    # Fake ffmpeg/ffprobe/curl: every clip reports PTS 1.48..5.44 at 25fps and
+    # ffmpeg just writes a marker file, so the rewrite logic is exercised
+    # without downloading real segments.
+    local shim="$TEST_HOME/rebasebin"
+    mkdir -p "$shim"
+    cat > "$shim/curl" <<'EOF'
+#!/bin/bash
+out=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-o" ]] && out="$a"
+    prev="$a"
+done
+[[ -n "$out" ]] && printf 'TS' > "$out"
+exit 0
+EOF
+    cat > "$shim/ffmpeg" <<'EOF'
+#!/bin/bash
+# Model the real stream copy: output first/last = input first/last + shift,
+# recorded in a sidecar the fake ffprobe serves for *-r.ts files.
+shift=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-itsoffset" ]] && shift="$a"
+    prev="$a"
+done
+out="${!#}"
+[[ -z "$shift" ]] && shift=0
+printf 'REBASED' > "$out"
+first=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 1.48+s}')
+last=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 5.44+s}')
+printf '%s,\n%s,\n' "$first" "$last" > "$out.pts"
+# The real pipeline writes via a .part temp then renames; publish the sidecar
+# under the final name too so the cache-reuse pass finds it.
+base="${out%%.part.*}"
+[[ "$base" != "$out" ]] && printf '%s,\n%s,\n' "$first" "$last" > "$base.pts"
+exit 0
+EOF
+    cat > "$shim/ffprobe" <<'EOF'
+#!/bin/bash
+args="$*"
+file="${!#}"
+if [[ "$args" == *packet=pts_time* && -f "$file.pts" ]]; then
+    cat "$file.pts"
+    exit 0
+fi
+case "$args" in
+    *packet=pts_time*) printf '1.480000,\n5.440000,\n' ;;
+    *avg_frame_rate*|*r_frame_rate*) printf '25/1\n' ;;
+    *"-select_streams v"*) printf 'video\n' ;;
+    *) printf 'video\naudio\n' ;;
+esac
+exit 0
+EOF
+    chmod +x "$shim/curl" "$shim/ffmpeg" "$shim/ffprobe"
+
+    local base="https://cdn.example/hls/index.m3u8"
+    local pl="$TEST_HOME/rebase-in.m3u8"
+    cat > "$pl" <<'EOF'
+#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:4.0,
+https://cdn.example/hls/prev.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4.0,
+https://cdn.example/hls/convertv7/aaa.ts
+#EXT-X-DISCONTINUITY
+#EXT-X-DISCONTINUITY
+#EXTINF:5.4,
+https://cdn.example/hls/convertv7/bbb.ts
+#EXT-X-DISCONTINUITY
+#EXT-X-DISCONTINUITY
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:3.0,
+https://cdn.example/hls/next.ts
+#EXT-X-ENDLIST
+EOF
+
+    local ha hb hprev out
+    ha=$(hash_url "https://cdn.example/hls/convertv7/aaa.ts")
+    hb=$(hash_url "https://cdn.example/hls/convertv7/bbb.ts")
+    hprev=$(hash_url "https://cdn.example/hls/prev.ts")
+    out="$TEST_HOME/rebase-out.m3u8"
+
+    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out" "$base" || return 1
+
+    # Exact rewrite: convertv URIs become local rebased paths, every
+    # DISCONTINUITY is gone, EXTINF/keys/movie segments are untouched.
+    local expected
+    expected=$(printf '%s\n' \
+        '#EXTM3U' \
+        '#EXT-X-PLAYLIST-TYPE:VOD' \
+        '#EXTINF:4.0,' \
+        'https://cdn.example/hls/prev.ts' \
+        '#EXTINF:4.0,' \
+        "$CACHE/segments/$ha-r.ts" \
+        '#EXTINF:5.4,' \
+        "$CACHE/segments/$hb-r.ts" \
+        '#EXT-X-KEY:METHOD=NONE' \
+        '#EXTINF:3.0,' \
+        'https://cdn.example/hls/next.ts' \
+        '#EXT-X-ENDLIST')
+    assert_eq "$expected" "$(cat "$out")" "playlist rewritten in place" || return 1
+    [[ -s "$CACHE/segments/$ha-r.ts" ]] || { echo "rebased clip a missing" >&2; return 1; }
+    [[ -s "$CACHE/segments/$hb-r.ts" ]] || { echo "rebased clip b missing" >&2; return 1; }
+    [[ -s "$CACHE/segments/$hprev.ts" ]] || { echo "cursor anchor not downloaded" >&2; return 1; }
+
+    # Second pass with a failing ffmpeg: cached rebased clips must be reused
+    # (their PTS already matches the cursor), so no download/rebase happens.
+    printf '#!/bin/bash\nexit 1\n' > "$shim/ffmpeg"
+    chmod +x "$shim/ffmpeg"
+    local out2="$TEST_HOME/rebase-out2.m3u8"
+    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out2" "$base" || return 1
+    assert_eq "$expected" "$(cat "$out2")" "cached rebased clips reused" || return 1
+}
+
+test_hls_fetch_clean_without_ffmpeg_keeps_strip_output() {
+    # PATH without ffmpeg/ffprobe: hls_fetch_clean must keep exactly the
+    # hls_strip_ads output (convertv URIs + discontinuities), no segment cache.
+    local minbin="$TEST_HOME/minbin-noffmpeg"
+    mkdir -p "$minbin"
+    local tool p
+    for tool in awk sed grep cut md5sum mktemp mv rm date sort tr head cat; do
+        p=$(command -v "$tool" 2>/dev/null) && ln -sf "$p" "$minbin/$tool"
+    done
+    cat > "$minbin/curl" <<EOF
+#!/bin/bash
+cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
+EOF
+    chmod +x "$minbin/curl"
+
+    local url="https://cdn.example/hls/media.m3u8"
+    local expected out hash clean
+    expected=$(hls_strip_ads "$url" < "$SCRIPT_DIR/fixtures/ad_playlist.m3u8")
+
+    out=$(PATH="$minbin" hls_fetch_clean "$url") || return 1
+    hash=$(hash_url "$url")
+    clean="$CACHE/$hash-clean.m3u8"
+    assert_eq "$clean" "$out" "clean path echoed" || return 1
+    assert_eq "$expected" "$(cat "$clean")" "strip_ads output kept without ffmpeg" || return 1
+    assert_contains "$(cat "$clean")" "convertv8" "convertv URIs stay" || return 1
+    assert_contains "$(cat "$clean")" "#EXT-X-DISCONTINUITY" "discontinuities stay" || return 1
+    [[ ! -e "$CACHE/segments" ]] || { echo "segments cache must not be created" >&2; return 1; }
 }
 
 test_play_video_cleans_url() {
@@ -820,6 +968,8 @@ TESTS=(
     hls_fetch_clean_cache_fallback
     hls_fetch_clean_quality
     hls_fetch_clean_canary
+    hls_rebase_convertv_rewrites_playlist
+    hls_fetch_clean_without_ffmpeg_keeps_strip_output
     play_video_cleans_url
     play_video_disabled_ad_block
     play_video_fallback_url

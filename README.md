@@ -14,7 +14,7 @@ Trình phim/TV/anime phụ đề Việt chạy trong Terminal, dành cho Linux.
 
 **Bắt buộc:** `fzf` + `jq` + `curl` — kèm `mpv` hoặc `vlc` để phát.
 
-**Khuyến nghị thêm:** `chafa` (poster preview), `yt-dlp` + `aria2c` (tải đa luồng), `notify-send` (thông báo khi tải xong).
+**Khuyến nghị thêm:** `chafa` (poster preview), `yt-dlp` + `aria2c` (tải đa luồng), `notify-send` (thông báo khi tải xong), `ffmpeg` + `ffprobe` (ghép mốc thời gian clip convertv để tua mượt; thiếu vẫn phát bình thường).
 
 ### Cài đặt theo distro
 
@@ -91,6 +91,7 @@ Khi phát phim từ phimapi, các khối quảng cáo bị chèn giữa tập s�
 Cách hoạt động:
 - Playlist HLS được tải về và lọc bỏ các segment quảng cáo (pattern trong biến `HLS_AD_PATTERNS`, bắt được cả CDN `kkphimplayer6` lẫn `kkphimplayer7` cùng các biến thể `ads*/`, `promo*/`)
 - **Chất lượng video** (Cài Đặt → Chất Lượng) áp dụng cho cả HLS: mặc định lấy variant độ phân giải cao nhất, chọn 720p sẽ lấy variant ≤ 720p
+- **Các clip `convertv*` chứa cảnh phim thật nhưng bị CDN đặt lại mốc thời gian** (bắt đầu lại từ ~1,48 giây, kèm dấu `DISCONTINUITY`) được ghép liền mạch vào dòng thời gian của phim bằng `ffmpeg` (bản ghép cache trong `cache/segments/`), nhờ đó tua qua đoạn này không còn nhảy cóc hay quay về đầu phim. Máy thiếu `ffmpeg`/`ffprobe` hoặc tải/ghép lỗi thì giữ nguyên playlist kèm dấu `DISCONTINUITY` như trước — phát phim không bao giờ bị gián đoạn
 - Bản đã lọc được cache tại `~/.config/sudachi/cache/<hash>-clean.m3u8`
 - **Tự phát hiện CDN đổi layout ad**: nếu playlist có dấu hiệu quảng cáo (DISCONTINUITY) nhưng không khớp pattern nào, chương trình ghi cảnh báo vào `cache/debug.log` để bạn biết cần cập nhật pattern
 - Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; chỉ khi chưa có cache mới phát stream gốc — xem phim không bao giờ bị gián đoạn

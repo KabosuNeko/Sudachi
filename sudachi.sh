@@ -425,15 +425,177 @@ hls_fallback_url() {
     fi
 }
 
+# hls_rebase_convertv <in-playlist-file> <out-playlist-file> <base-url> --
+# convertv* segments are real movie content (ending scenes + credits) whose
+# PTS restarts at ~1.48s; the CDN brackets them with #EXT-X-DISCONTINUITY.
+# Seeking into or across such a cluster makes mpv skip past it or reset to
+# ~1.5s (looks like a restart from the beginning). This rebases each convertv
+# clip onto the movie timeline. The clip is downloaded (cached under
+# $CACHE/segments/) and stream-copied with a constant PTS offset so its first
+# video PTS equals the running cursor (end of the movie segment preceding the
+# cluster, then the end of each rebased clip):
+#   ffmpeg -loglevel error -nostdin -y -itsoffset <cursor-first_pts> -i <in> \
+#          -c copy -copyts -muxdelay 0 -muxpreload 0 -f mpegts <out>
+# -itsoffset shifts every packet and -copyts keeps the shifted timestamps
+# (without -copyts ffmpeg re-normalizes the output to 0); -muxdelay and
+# -muxpreload 0 stop the mpegts muxer from adding its default 0.7s delay.
+# Verified against the Frieren s6 CDN: first video PTS lands exactly on the
+# cursor and the packet layout (h264 + aac) is unchanged. When the shift would
+# be negative (no preceding movie segment, cursor 0) the clip is normalized to
+# the cursor with -output_ts_offset instead. Rebased copies are cached as
+# $CACHE/segments/<hash>-r.ts and reused when their first PTS still matches
+# the cursor; otherwise they are rebuilt from the cached download. Writes
+# <out>: convertv URI lines become local rebased paths, every
+# #EXT-X-DISCONTINUITY is removed (the timeline is continuous again), EXTINF
+# and all other lines are kept as-is. Returns 1 when ffmpeg/ffprobe are
+# missing, the playlist has no convertv segment, or any download/probe/rebase
+# step fails -- the caller then keeps the un-rebased playlist so playback
+# never breaks.
+hls_rebase_convertv() {
+    local in="$1" out="$2" base="$3"
+    local segdir="$CACHE/segments"
+    local line prev_uri="" first_prev="" seen_first=0 cursor=0
+    local abs hash src dst shift out_pts p_first p_last fdur map rc uri dst_first
+    local -a clips=() rebased=()
+
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    command -v ffprobe >/dev/null 2>&1 || return 1
+    [[ -f "$in" ]] || return 1
+    grep -qE 'convertv[0-9]*/' "$in" || return 1
+
+    # Private helpers for this pipeline; "-f mpegts" keeps ffprobe/ffmpeg from
+    # parsing a mis-downloaded file as an HLS playlist and touching the network.
+    _rebase_fetch() { # <abs-url> <cache-file>; 1 on download failure
+        local tmp="$2.part.$$"
+        [[ -s "$2" ]] && return 0
+        curl -fsS --connect-timeout 10 --max-time 30 "$1" -o "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+        [[ -s "$tmp" ]] || { rm -f "$tmp"; return 1; }
+        mv -f "$tmp" "$2" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    }
+    _rebase_pts() { # <file> -> "first last" video PTS on stdout, 1 when absent
+        ffprobe -f mpegts -v error -select_streams v -show_entries packet=pts_time -of csv=p=0 "$1" 2>/dev/null \
+            | sed 's/,$//' | grep -E '^-?[0-9]+(\.[0-9]+)?$' | sort -n \
+            | awk 'NR==1{f=$0}{l=$0}END{if(f=="")exit 1; print f, l}'
+    }
+    _rebase_framedur() { # <file> -> video frame duration ("0" when unknown)
+        local rate
+        rate=$(ffprobe -f mpegts -v error -select_streams v -show_entries stream=avg_frame_rate -of csv=p=0 "$1" 2>/dev/null | head -1)
+        [[ "$rate" == */* ]] || rate=$(ffprobe -f mpegts -v error -select_streams v -show_entries stream=r_frame_rate -of csv=p=0 "$1" 2>/dev/null | head -1)
+        awk -v r="$rate" 'BEGIN{split(r,a,"/"); if (a[1]+0 > 0 && a[2]+0 > 0) printf "%.6f", a[2]/a[1]; else print "0"}'
+    }
+
+    # Convertv clips in playlist order, plus the movie segment immediately
+    # before the first one (the cursor anchor).
+    while IFS= read -r line; do
+        [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+        if [[ "$line" =~ convertv[0-9]*/ ]]; then
+            if [[ $seen_first -eq 0 ]]; then
+                first_prev="$prev_uri"
+                seen_first=1
+            fi
+            clips+=("$line")
+        fi
+        prev_uri="$line"
+    done < "$in"
+
+    [[ ${#clips[@]} -gt 0 ]] || return 1
+    mkdir -p "$segdir" || return 1
+
+    if [[ -n "$first_prev" ]]; then
+        local prev_abs prev_hash prev_src
+        prev_abs=$(hls_absolutize_url "$base" "$first_prev")
+        prev_hash=$(hash_url "$prev_abs")
+        prev_src="$segdir/$prev_hash.ts"
+        _rebase_fetch "$prev_abs" "$prev_src" || return 1
+        out_pts=$(_rebase_pts "$prev_src") || return 1
+        read -r p_first p_last <<< "$out_pts"
+        fdur=$(_rebase_framedur "$prev_src")
+        cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
+    fi
+
+    for uri in "${clips[@]}"; do
+        abs=$(hls_absolutize_url "$base" "$uri")
+        hash=$(hash_url "$abs")
+        src="$segdir/$hash.ts"
+        dst="$segdir/$hash-r.ts"
+
+        # Cached rebased clip is usable only when it still starts at the
+        # current cursor (the same URI may be republished in another timeline).
+        if [[ -s "$dst" ]]; then
+            local dst_pts
+            dst_pts=$(_rebase_pts "$dst") || return 1
+            read -r dst_first p_last <<< "$dst_pts"
+            if awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}'; then
+                rebased+=("$dst")
+                fdur=$(_rebase_framedur "$dst")
+                cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
+                continue
+            fi
+        fi
+
+        [[ -s "$src" ]] || _rebase_fetch "$abs" "$src" || return 1
+        out_pts=$(_rebase_pts "$src") || return 1
+        read -r p_first p_last <<< "$out_pts"
+
+        # Write to a temp name so an interrupted rebase can never leave a
+        # truncated dst that the cursor check might mistake for a good one.
+        local dst_tmp="$dst.part.$$"
+        shift=$(awk -v c="$cursor" -v f="$p_first" 'BEGIN{printf "%.6f", c-f}')
+        if [[ "$shift" == -* ]]; then
+            ffmpeg -loglevel error -nostdin -y -i "$src" -c copy -muxdelay 0 -muxpreload 0 \
+                -output_ts_offset "$cursor" -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+        else
+            ffmpeg -loglevel error -nostdin -y -itsoffset "$shift" -i "$src" -c copy -copyts \
+                -muxdelay 0 -muxpreload 0 -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+        fi
+        [[ -s "$dst_tmp" ]] || { rm -f "$dst_tmp"; return 1; }
+
+        # The stream codecs must survive the stream copy (video + audio).
+        local src_codecs dst_codecs
+        src_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$src" 2>/dev/null | sort -u | tr '\n' ' ')
+        dst_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$dst_tmp" 2>/dev/null | sort -u | tr '\n' ' ')
+        [[ -n "$src_codecs" && "$src_codecs" == "$dst_codecs" ]] || { rm -f "$dst_tmp"; return 1; }
+
+        out_pts=$(_rebase_pts "$dst_tmp") || { rm -f "$dst_tmp"; return 1; }
+        read -r dst_first p_last <<< "$out_pts"
+        # The stream copy must have landed the clip exactly on the cursor.
+        awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}' \
+            || { rm -f "$dst_tmp"; return 1; }
+        fdur=$(_rebase_framedur "$dst_tmp")
+        cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
+        mv -f "$dst_tmp" "$dst" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+        rebased+=("$dst")
+    done
+
+    map=$(mktemp "$CACHE/.rebase.XXXXXX" 2>/dev/null) || map="$CACHE/.rebase-$$.map"
+    printf '%s\n' "${rebased[@]}" > "$map" || { rm -f "$map"; return 1; }
+    awk -v mapfile="$map" '
+        BEGIN { n = 0; while ((getline p < mapfile) > 0) paths[++n] = p }
+        /^#EXT-X-DISCONTINUITY$/ { next }
+        {
+            if ($0 !~ /^#/ && $0 != "" && $0 ~ /convertv[0-9]*\//) {
+                i++
+                if (i <= n) { print paths[i]; next }
+            }
+            print
+        }
+    ' "$in" > "$out"
+    rc=$?
+    rm -f "$map"
+    [[ $rc -eq 0 && -s "$out" ]] || return 1
+    return 0
+}
+
 # hls_fetch_clean <url> -- fetch an HLS playlist (master or media), strip ad
-# segments via hls_strip_ads, absolutize segment URIs, cache the result as
-# $CACHE/<hash>-clean.m3u8 and echo its local path. For a master playlist the
-# variant matching QUALITY is fetched (highest resolution when QUALITY is
-# empty). On a fetch failure the cached cleaned playlist is reused when
-# available; with no cache the original url is echoed unchanged. Always
-# returns 0 (silent fallback: playback must never break).
+# segments via hls_strip_ads, absolutize segment URIs, rebase convertv sponsor
+# clips via hls_rebase_convertv, cache the result as $CACHE/<hash>-clean.m3u8
+# and echo its local path. For a master playlist the variant matching QUALITY
+# is fetched (highest resolution when QUALITY is empty). On a fetch failure the
+# cached cleaned playlist is reused when available; with no cache the original
+# url is echoed unchanged. Always returns 0 (silent fallback: playback must
+# never break).
 hls_fetch_clean() {
-    local url="$1" master variant media out tmp hash clean
+    local url="$1" master variant media out tmp tmp2 hash clean
     hash=$(hash_url "$url")
     clean="$CACHE/$hash-clean.m3u8"
 
@@ -468,6 +630,14 @@ hls_fetch_clean() {
     fi
     tmp=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp="$CACHE/.tmp-$$.m3u8"
     if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
+        # Rebase convertv sponsor clips onto the movie timeline when possible;
+        # any failure (no ffmpeg, download/probe/rebase error) keeps tmp.
+        tmp2=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp2="$CACHE/.tmp2-$$.m3u8"
+        if hls_rebase_convertv "$tmp" "$tmp2" "$media"; then
+            mv -f "$tmp2" "$tmp" 2>/dev/null || rm -f "$tmp2"
+        else
+            rm -f "$tmp2"
+        fi
         if [[ -s "$tmp" ]] && mv -f "$tmp" "$clean" 2>/dev/null; then
             echo "$clean"
         else
@@ -1487,7 +1657,7 @@ select_quality() {
 
 purge_api_cache() {
     rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8
-    rm -rf "$CACHE/desc"
+    rm -rf "$CACHE/desc" "$CACHE/segments"
 }
 
 clear_cache() {
