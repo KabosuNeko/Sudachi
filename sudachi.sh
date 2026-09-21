@@ -501,22 +501,54 @@ hls_rebase_convertv() {
     [[ ${#clips[@]} -gt 0 ]] || return 1
     mkdir -p "$segdir" || return 1
 
+    # Resolve every source file first and prefetch the missing ones in
+    # parallel batches (4 at a time) so the first play does not wait for seven
+    # sequential downloads.
+    local -a urls=() hashes=() srcs=() need_urls=() need_files=()
+    local prev_abs="" prev_src=""
     if [[ -n "$first_prev" ]]; then
-        local prev_abs prev_hash prev_src
         prev_abs=$(hls_absolutize_url "$base" "$first_prev")
-        prev_hash=$(hash_url "$prev_abs")
-        prev_src="$segdir/$prev_hash.ts"
-        _rebase_fetch "$prev_abs" "$prev_src" || return 1
+        prev_src="$segdir/$(hash_url "$prev_abs").ts"
+    fi
+    for uri in "${clips[@]}"; do
+        local a h
+        a=$(hls_absolutize_url "$base" "$uri")
+        h=$(hash_url "$a")
+        urls+=("$a"); hashes+=("$h"); srcs+=("$segdir/$h.ts")
+        [[ -s "$segdir/$h.ts" ]] || { need_urls+=("$a"); need_files+=("$segdir/$h.ts"); }
+    done
+    if [[ -n "$prev_src" && ! -s "$prev_src" ]]; then
+        need_urls+=("$prev_abs"); need_files+=("$prev_src")
+    fi
+    if (( ${#need_urls[@]} > 0 )); then
+        printf '  Đang tải %d đoạn cần ghép...\n' "${#need_urls[@]}" >&2
+        local i j
+        for ((i = 0; i < ${#need_urls[@]}; i += 4)); do
+            local -a batch=()
+            for ((j = i; j < i + 4 && j < ${#need_urls[@]}; j++)); do
+                _rebase_fetch "${need_urls[j]}" "${need_files[j]}" &
+                batch+=($!)
+            done
+            wait "${batch[@]}" || true
+        done
+        local f
+        for f in "${need_files[@]}"; do
+            [[ -s "$f" ]] || return 1
+        done
+    fi
+
+    if [[ -n "$prev_src" ]]; then
         out_pts=$(_rebase_pts "$prev_src") || return 1
         read -r p_first p_last <<< "$out_pts"
         fdur=$(_rebase_framedur "$prev_src")
         cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
     fi
 
-    for uri in "${clips[@]}"; do
-        abs=$(hls_absolutize_url "$base" "$uri")
-        hash=$(hash_url "$abs")
-        src="$segdir/$hash.ts"
+    local idx
+    for idx in "${!clips[@]}"; do
+        abs="${urls[idx]}"
+        hash="${hashes[idx]}"
+        src="${srcs[idx]}"
         dst="$segdir/$hash-r.ts"
 
         # Cached rebased clip is usable only when it still starts at the
@@ -539,6 +571,7 @@ hls_rebase_convertv() {
 
         # Write to a temp name so an interrupted rebase can never leave a
         # truncated dst that the cursor check might mistake for a good one.
+        printf '  Đang ghép đoạn tài trợ %d/%d...\n' "$((idx + 1))" "${#clips[@]}" >&2
         local dst_tmp="$dst.part.$$"
         shift=$(awk -v c="$cursor" -v f="$p_first" 'BEGIN{printf "%.6f", c-f}')
         if [[ "$shift" == -* ]]; then
