@@ -877,8 +877,8 @@ view_downloads() {
 
     local chon
     chon=$(echo -e "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="TẢI PHIM > " \
-        --header=" 󰌑 Xem tác vụ tải  │  Xem log tiến độ bên dưới  │  Esc Quay lại " \
+        --delimiter='|' --with-nth=1 --prompt="Tải phim > " \
+        --header="Enter xem log · Esc quay lại" \
         --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:55%:rounded:wrap)
     [[ -z "$chon" ]] && return
 }
@@ -1167,7 +1167,7 @@ pick_server() {
     if [[ "${count:-0}" -gt 1 ]]; then
         name_list="${parsed#*$'\n'}"
         local name
-        name=$(add_menu_numbers <<< "$name_list" | fzf "${FZF_OPTS[@]}" --prompt="SERVER > " --header="Chọn server" --height=40%)
+        name=$(add_menu_numbers <<< "$name_list" | fzf "${FZF_OPTS[@]}" --prompt="Server > " --header="Chọn server" --height=40%)
         [[ -z "$name" ]] && return 1
         name="${name#*. }"
 
@@ -1218,8 +1218,8 @@ watch_episode() {
         data=""
 
         chon=$(fzf "${FZF_OPTS[@]}" \
-            --header="󰟴 $ten${continue_header:+  │  }${continue_header}  │  󰌑 Xem  │  󰌒 Tải (Tab)  │  󰋑 Lưu (Ctrl+F)" \
-            --prompt="CHỌN TẬP > " \
+            --header="$ten${continue_header:+  │  }${continue_header}  │  Enter xem  │  Tab tải  │  Ctrl+F yêu thích" \
+            --prompt="Chọn tập > " \
             --delimiter='|' --with-nth=1 \
             --expect=enter,tab,ctrl-f <<< "$ds_tap")
         [[ -z "$chon" ]] && break
@@ -1272,7 +1272,7 @@ show_list() {
     chon=$(fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth='{1}' \
         --preview="$preview {}" \
-        --header=" 󰌑 Chọn xem phim  │  Esc Quay lại " \
+        --header="Enter chọn · Esc quay lại " \
         --prompt="$prompt > " <<< "$formatted")
 
     rm -f "$preview"
@@ -1312,7 +1312,7 @@ show_paginated_list() {
         output=$(fzf "${FZF_OPTS[@]}" \
             --delimiter='|' --with-nth='{1}' \
             --preview="$preview {}" \
-            --header=" 󰌑 Chọn xem  │  󰁍/󰁔 Trang $page  │  Esc Quay lại " \
+            --header="Enter chọn · ←/→ trang $page · Esc quay lại " \
             --prompt="$prompt > " \
             --expect=right,left,enter <<< "$formatted")
 
@@ -1396,7 +1396,7 @@ search() {
     local chon
     chon=$(printf '%s\n' "$initial_input" | fzf "${FZF_OPTS[@]}" \
         "${fzf_query_arg[@]}" \
-        --prompt="󱇒 TÌM > " --header=" 󰌑 Chọn xem  │  Nhập từ khóa để tìm kiếm... " --phony \
+        --prompt="Tìm phim > " --header="Enter chọn · gõ để tìm kiếm " --phony \
         --delimiter='|' --with-nth='{1}' \
         --bind "change:reload:sleep 0.2; $search {q} || true" \
         --preview="$preview {}")
@@ -1452,7 +1452,7 @@ browse() {
     esac
 
     local chon
-    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="DUYỆT > " --height=50%)
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="Duyệt > " --height=50%)
     [[ -z "$chon" ]] && return
 
     local loai="${chon#*|}"
@@ -1500,7 +1500,7 @@ filter_by_year() {
     ds="${ds%$'\n'}"
 
     local chon
-    chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="NĂM > " --height=50%)
+    chon=$(echo -e "$ds" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --prompt="Năm > " --height=50%)
     [[ -z "$chon" ]] && return
 
     local nam_chon="${chon#*. }"
@@ -1528,17 +1528,17 @@ anime_mode() {
 }
 
 advanced_filter() {
-    local menu="  Thể Loại|theloai
-  Quốc Gia|quocgia
+    local menu="  Thể loại|theloai
+  Quốc gia|quocgia
   Năm|nam"
 
     local chon
-    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="LỌC > " --height=40%)
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="Lọc > " --height=40%)
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
-        theloai) filter_by_category "THỂ LOẠI" "/the-loai" "category" ;;
-        quocgia) filter_by_category "QUỐC GIA" "/quoc-gia" "country" ;;
+        theloai) filter_by_category "Thể loại" "/the-loai" "category" ;;
+        quocgia) filter_by_category "Quốc gia" "/quoc-gia" "country" ;;
         nam)     filter_by_year ;;
     esac
 }
@@ -1555,8 +1555,8 @@ history() {
     local chon
     chon=$(fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 \
-        --header=" 󰌑 Xem lại phim  │  Esc Quay lại " \
-        --prompt="LỊCH SỬ > " <<< "$formatted")
+        --header="Enter xem lại · Esc quay lại " \
+        --prompt="Lịch sử > " <<< "$formatted")
     [[ -z "$chon" ]] && return
     local title url
     IFS='|' read -r _ _ title _ url <<< "$chon"
@@ -1579,8 +1579,8 @@ favorites() {
 
     local chon
     chon=$(fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 \
-        --header=" 󰌑 Xem  │  󰆴 Xóa (Ctrl-D)  │  Esc Quay lại " \
-        --prompt="YÊU THÍCH > " --expect=enter,ctrl-d <<< "$parsed_favs")
+        --header="Enter xem · Ctrl+D xóa · Esc quay lại " \
+        --prompt="Yêu thích > " --expect=enter,ctrl-d <<< "$parsed_favs")
 
     local phim data
     IFS= read -r phim <<< "$chon"
@@ -1621,8 +1621,8 @@ select_source() {
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="NGUỒN > " --height=40% \
-        --header=" 󰌑 Chọn nguồn dữ liệu phim  │  Esc Quay lại ")
+        --delimiter='|' --with-nth=1 --prompt="Nguồn > " --height=40% \
+        --header="Nguồn phim · Esc quay lại ")
     [[ -z "$chon" ]] && return
 
     local new_source="${chon#*|}"
@@ -1652,8 +1652,8 @@ select_player() {
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="TRÌNH PHÁT > " --height=40% \
-        --header=" 󰌑 Chọn trình phát mặc định  │  Esc Quay lại ")
+        --delimiter='|' --with-nth=1 --prompt="Trình phát > " --height=40% \
+        --header="Trình phát · Esc quay lại ")
     [[ -z "$chon" ]] && return
 
     PLAYER_DEFAULT="${chon#*|}"
@@ -1671,15 +1671,15 @@ select_quality() {
         *)    current_mark_auto=" \033[1;32m(đang dùng)\033[0m" ;;
     esac
 
-    local menu="󰎤  Tự động (Chất lượng cao nhất)${current_mark_auto}|auto
-󰎤  1080p (Full HD)${current_mark_1080}|1080
-󰎤  720p (HD)${current_mark_720}|720
-󰎤  480p (SD)${current_mark_480}|480"
+    local menu="󰎤  Tự động${current_mark_auto}|auto
+󰎤  1080p${current_mark_1080}|1080
+󰎤  720p${current_mark_720}|720
+󰎤  480p${current_mark_480}|480"
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="CHẤT LƯỢNG > " --height=40% \
-        --header=" 󰌑 Chọn độ phân giải mặc định  │  Esc Quay lại ")
+        --delimiter='|' --with-nth=1 --prompt="Chất lượng > " --height=40% \
+        --header="Chất lượng mặc định · Esc quay lại ")
     [[ -z "$chon" ]] && return
 
     local selected="${chon#*|}"
@@ -1723,18 +1723,18 @@ settings() {
     local ad_status
     [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
 
-    local menu="${I_PLAYER} Chọn Trình Phát Mặc Định|player
-${I_SOURCE} Đổi Nguồn Dữ Liệu|nguon
-${I_QUA} Chất Lượng Video Mặc Định|quality
-󰫈  Chặn Quảng Cáo Video: ${ad_status}|adblock
-󰇚  Tiến Độ & Quản Lý Tải Phim|downloads
-${I_DIR} Mở Thư Mục Tải Phim|folder
-${I_CACHE} Xóa Bộ Nhớ Đệm (Cache)|cache"
+    local menu="${I_PLAYER} Trình phát|player
+${I_SOURCE} Nguồn phim|nguon
+${I_QUA} Chất lượng|quality
+󰫈  Chặn quảng cáo: ${ad_status}|adblock
+󰇚  Tải phim|downloads
+${I_DIR} Mở thư mục|folder
+${I_CACHE} Xóa cache|cache"
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="CÀI ĐẶT > " --height=45% \
-        --header=" 󰌑 Chọn mục cài đặt  │  Esc Quay lại ")
+        --delimiter='|' --with-nth=1 --prompt="Cài đặt > " --height=45% \
+        --header="Cài đặt · Esc quay lại ")
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
@@ -1786,20 +1786,20 @@ show_banner() {
 main_menu() {
     local menu_items=""
 
-    menu_items+="${I_SEARCH} Tìm Kiếm Phim\n"
-    menu_items+="${I_NEW} Phim Mới Cập Nhật\n"
-    menu_items+="${I_BROWSE} Duyệt Phim\n"
-    menu_items+="${I_ANIME} Anime & Hoạt Hình\n"
-    menu_items+="${I_FILTER} Lọc Nâng Cao\n"
-    menu_items+="${I_HIST} Lịch Sử Xem\n"
-    menu_items+="${I_FAV} Phim Yêu Thích\n"
-    menu_items+="${I_SETTINGS} Cài Đặt Hệ Thống\n"
+    menu_items+="${I_SEARCH} Tìm phim\n"
+    menu_items+="${I_NEW} Phim mới\n"
+    menu_items+="${I_BROWSE} Duyệt\n"
+    menu_items+="${I_ANIME} Anime\n"
+    menu_items+="${I_FILTER} Lọc\n"
+    menu_items+="${I_HIST} Lịch sử\n"
+    menu_items+="${I_FAV} Yêu thích\n"
+    menu_items+="${I_SETTINGS} Cài đặt\n"
     menu_items+="${I_EXIT} Thoát"
 
     echo -e "$menu_items" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --prompt="MENU > " --height=50% \
+        --prompt="Menu > " --height=50% \
         --border-label=" 🍙 Sudachi Menu " --border-label-pos=2 \
-        --header=" 󰌑 Chọn mục  │  Dùng phím số hoặc mũi tên để điều hướng "
+        --header="Chọn mục · mũi tên hoặc phím số "
 }
 
 handle_cli_args() {
@@ -1870,14 +1870,14 @@ handle_cli_args "$@"
 while true; do
     show_banner
     case "$(main_menu)" in
-        *"Tìm Kiếm"*)   search ;;
-        *"Phim Mới"*)   new_releases ;;
-        *"Duyệt Phim"*) browse ;;
+        *"Tìm phim"*)   search ;;
+        *"Phim mới"*)   new_releases ;;
+        *"Duyệt"*)      browse ;;
         *"Anime"*)      anime_mode ;;
-        *"Lọc Nâng Cao"*) advanced_filter ;;
-        *"Lịch Sử"*)    history ;;
-        *"Yêu Thích"*)  favorites ;;
-        *"Cài Đặt"*)    settings ;;
+        *"Lọc"*)        advanced_filter ;;
+        *"Lịch sử"*)    history ;;
+        *"Yêu thích"*)  favorites ;;
+        *"Cài đặt"*)    settings ;;
         *"Thoát"*)      exit 0 ;;
     esac
 done
