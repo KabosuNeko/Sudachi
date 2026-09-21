@@ -217,6 +217,50 @@ test_hls_strip_preroll_postroll() {
     assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
 }
 
+test_hls_strip_ads_structural() {
+    # Tier 2: an ad block opened by #EXT-X-KEY:METHOD=NONE whose segment URIs
+    # do NOT match HLS_AD_PATTERNS (renamed CDN directory, root-relative
+    # outside the movie directory) must still be dropped.
+    local base="https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/index.m3u8"
+    local ad_uri="/newlayout/d61a03b1/segment_0001.ts"
+    if printf '%s\n' "$ad_uri" | grep -qE "$HLS_AD_PATTERNS"; then
+        echo "fixture URI unexpectedly matches HLS_AD_PATTERNS" >&2
+        return 1
+    fi
+
+    local out expected
+    out=$(printf '#EXTM3U\n#EXTINF:6.0,\nGmydHZmS.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:3.72,\n/newlayout/d61a03b1/segment_0001.ts\n#EXTINF:2.36,\n/newlayout/d61a03b1/segment_0002.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.76,\n7pKTYERY.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
+    expected=$(printf '%s\n' \
+        '#EXTM3U' \
+        '#EXT-X-PLAYLIST-TYPE:VOD' \
+        '#EXTINF:6.0,' \
+        'https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/GmydHZmS.ts' \
+        '#EXT-X-DISCONTINUITY' \
+        '#EXTINF:2.76,' \
+        'https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/7pKTYERY.ts' \
+        '#EXT-X-ENDLIST')
+    assert_eq "$expected" "$out" "pattern-free ad block dropped" || return 1
+}
+
+test_hls_strip_ads_structural_control() {
+    # METHOD=NONE followed by movie segments in the playlist directory must be
+    # untouched: the key tag passes through and nothing is dropped.
+    local base="https://cdn/x/a/index.m3u8"
+    local out expected
+    out=$(printf '#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:10.0,\nsegment_001.ts\n#EXTINF:10.0,\nsegment_002.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
+    expected=$(printf '%s\n' \
+        '#EXTM3U' \
+        '#EXT-X-PLAYLIST-TYPE:VOD' \
+        '#EXT-X-DISCONTINUITY' \
+        '#EXT-X-KEY:METHOD=NONE' \
+        '#EXTINF:10.0,' \
+        'https://cdn/x/a/segment_001.ts' \
+        '#EXTINF:10.0,' \
+        'https://cdn/x/a/segment_002.ts' \
+        '#EXT-X-ENDLIST')
+    assert_eq "$expected" "$out" "legit METHOD=NONE playlist untouched" || return 1
+}
+
 test_hls_pick_variant() {
     local master='#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
@@ -697,6 +741,121 @@ EOF
     assert_eq "$expected" "$(cat "$out2")" "cached rebased clips reused" || return 1
 }
 
+test_hls_rebase_convertv_multi_cluster() {
+    # Two convertv clusters separated by movie content: each cluster must be
+    # rebased from its own anchor (the movie segment before it), not chained
+    # onto the previous cluster.
+    local shim="$TEST_HOME/rebasebin-multi"
+    mkdir -p "$shim"
+    cat > "$shim/curl" <<'EOF'
+#!/bin/bash
+out=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-o" ]] && out="$a"
+    prev="$a"
+done
+[[ -n "$out" ]] && printf 'TS' > "$out"
+exit 0
+EOF
+    cat > "$shim/ffmpeg" <<'EOF'
+#!/bin/bash
+shift=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-itsoffset" ]] && shift="$a"
+    prev="$a"
+done
+out="${!#}"
+[[ -z "$shift" ]] && shift=0
+printf 'REBASED' > "$out"
+first=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 1.48+s}')
+last=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 5.44+s}')
+printf '%s,\n%s,\n' "$first" "$last" > "$out.pts"
+# The real pipeline writes via a .part temp then renames; publish the sidecar
+# under the final name too so the cache-reuse pass finds it.
+base="${out%%.part.*}"
+[[ "$base" != "$out" ]] && printf '%s,\n%s,\n' "$first" "$last" > "$base.pts"
+exit 0
+EOF
+    cat > "$shim/ffprobe" <<'EOF'
+#!/bin/bash
+args="$*"
+file="${!#}"
+if [[ "$args" == *packet=pts_time* && -f "$file.pts" ]]; then
+    cat "$file.pts"
+    exit 0
+fi
+case "$args" in
+    *packet=pts_time*) printf '1.480000,\n5.440000,\n' ;;
+    *avg_frame_rate*|*r_frame_rate*) printf '25/1\n' ;;
+    *"-select_streams v"*) printf 'video\n' ;;
+    *) printf 'video\naudio\n' ;;
+esac
+exit 0
+EOF
+    chmod +x "$shim/curl" "$shim/ffmpeg" "$shim/ffprobe"
+
+    local base="https://cdn.example/hls/index.m3u8"
+    local pl="$TEST_HOME/rebase-multi-in.m3u8"
+    cat > "$pl" <<'EOF'
+#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:10.0,
+https://cdn.example/hls/movie1.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4.0,
+https://cdn.example/hls/convertv7/aaa.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:10.0,
+https://cdn.example/hls/movie2.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5.4,
+https://cdn.example/hls/convertv7/bbb.ts
+#EXT-X-ENDLIST
+EOF
+
+    # Anchor PTS sidecars at 25fps: movie1 ends at 19.96s (cursor 20.0) and
+    # movie2 at 109.96s (cursor 110.0). The second cluster must land on its own
+    # cursor instead of continuing after the first cluster.
+    local hm1 hm2 ha hb
+    hm1=$(hash_url "https://cdn.example/hls/movie1.ts")
+    hm2=$(hash_url "https://cdn.example/hls/movie2.ts")
+    mkdir -p "$CACHE/segments"
+    printf '10.000000,\n19.960000,\n' > "$CACHE/segments/$hm1.ts.pts"
+    printf '100.000000,\n109.960000,\n' > "$CACHE/segments/$hm2.ts.pts"
+
+    ha=$(hash_url "https://cdn.example/hls/convertv7/aaa.ts")
+    hb=$(hash_url "https://cdn.example/hls/convertv7/bbb.ts")
+    local out="$TEST_HOME/rebase-multi-out.m3u8"
+    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out" "$base" || return 1
+
+    local expected
+    expected=$(printf '%s\n' \
+        '#EXTM3U' \
+        '#EXT-X-PLAYLIST-TYPE:VOD' \
+        '#EXTINF:10.0,' \
+        'https://cdn.example/hls/movie1.ts' \
+        '#EXTINF:4.0,' \
+        "$CACHE/segments/$ha-r.ts" \
+        '#EXTINF:10.0,' \
+        'https://cdn.example/hls/movie2.ts' \
+        '#EXTINF:5.4,' \
+        "$CACHE/segments/$hb-r.ts" \
+        '#EXT-X-ENDLIST')
+    assert_eq "$expected" "$(cat "$out")" "both clusters rewritten, discontinuities removed" || return 1
+    assert_contains "$(cat "$CACHE/segments/$ha-r.ts.pts")" "20.000000" "first cluster anchored on movie1 cursor" || return 1
+    assert_contains "$(cat "$CACHE/segments/$hb-r.ts.pts")" "110.000000" "second cluster anchored on movie2 cursor" || return 1
+
+    # Second pass with a failing ffmpeg: both clusters must be reused from
+    # cache because their first PTS still matches each cluster's cursor.
+    printf '#!/bin/bash\nexit 1\n' > "$shim/ffmpeg"
+    chmod +x "$shim/ffmpeg"
+    local out2="$TEST_HOME/rebase-multi-out2.m3u8"
+    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out2" "$base" || return 1
+    assert_eq "$expected" "$(cat "$out2")" "cached rebased clips reused per cluster" || return 1
+}
+
 test_hls_fetch_clean_without_ffmpeg_keeps_strip_output() {
     # PATH without ffmpeg/ffprobe: hls_fetch_clean must keep exactly the
     # hls_strip_ads output (convertv URIs + discontinuities), no segment cache.
@@ -813,6 +972,39 @@ EOF
     local first
     first=$(head -1 "$argsfile")
     assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives original url" || return 1
+}
+
+test_play_video_vlc_args() {
+    # VLC must receive the cleaned playlist plus the accurate-seek and network
+    # buffering flags; --preferred-resolution behavior is unchanged.
+    local bin="$TEST_HOME/vlcbin"
+    mkdir -p "$bin"
+    local argsfile="$TEST_HOME/vlc-args"
+    : > "$argsfile"
+    cat > "$bin/vlc" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$argsfile"
+EOF
+    chmod +x "$bin/vlc"
+
+    local curlbin="$TEST_HOME/vlcbin-curl"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+cat "$SCRIPT_DIR/fixtures/clean_playlist.m3u8"
+EOF
+    chmod +x "$curlbin/curl"
+
+    PLAYER_DEFAULT=vlc
+    QUALITY=720
+    PATH="$bin:$curlbin:$PATH" play_video "https://s6.kkphimplayer6.com/movie/3500kb/hls/index.m3u8" "Test Title"
+    local i=0
+    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
+    assert_contains "$(head -1 "$argsfile")" "-clean.m3u8" "vlc receives cleaned playlist" || return 1
+    assert_contains "$(cat "$argsfile")" "--no-video-title-show" "vlc title bar disabled" || return 1
+    assert_contains "$(cat "$argsfile")" "--no-input-fast-seek" "vlc accurate seek" || return 1
+    assert_contains "$(cat "$argsfile")" "--network-caching=3000" "vlc network buffering" || return 1
+    assert_contains "$(cat "$argsfile")" "--preferred-resolution=720" "vlc quality flag kept" || return 1
 }
 
 test_toggle_ad_block() {
@@ -961,6 +1153,8 @@ TESTS=(
     hls_absolutize_url
     hls_strip_ads
     hls_strip_preroll_postroll
+    hls_strip_ads_structural
+    hls_strip_ads_structural_control
     hls_pick_variant
     hls_strip_uri_attrs
     hls_fetch_clean_ok
@@ -969,10 +1163,12 @@ TESTS=(
     hls_fetch_clean_quality
     hls_fetch_clean_canary
     hls_rebase_convertv_rewrites_playlist
+    hls_rebase_convertv_multi_cluster
     hls_fetch_clean_without_ffmpeg_keeps_strip_output
     play_video_cleans_url
     play_video_disabled_ad_block
     play_video_fallback_url
+    play_video_vlc_args
     toggle_ad_block
     clear_cache_removes_all
     download_episode_vietnamese_name

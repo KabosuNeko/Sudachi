@@ -217,6 +217,9 @@ hash_url() {
 # Note: convertv[0-9]+/ segments are NOT video commercials; they are the actual
 # movie/anime scenes with a sponsor text watermark re-encoded on top. Dropping
 # convertv* cuts real movie dialogue and content, so they must be kept.
+# Pattern matches are complemented by structural detection (Tier 2) in
+# hls_strip_ads: a #EXT-X-KEY:METHOD=NONE block is dropped until movie content
+# in the playlist's own directory appears, so renamed ad paths survive less.
 HLS_AD_PATTERNS='(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|(^|/)v[0-9]+/[0-9a-f]+/segment_'
 
 # hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
@@ -259,6 +262,10 @@ hls_absolutize_url() {
 # poisons ffmpeg seek tables) and guarantees #EXT-X-PLAYLIST-TYPE:VOD.
 # Segments resolving into the playlist's own directory are movie content and
 # are never treated as ads, even when they match HLS_AD_PATTERNS.
+# Tier 2 structural detection: a #EXT-X-KEY:METHOD=NONE tag opens a candidate
+# block; every following segment outside the playlist's own directory is
+# treated as an ad until a movie segment appears, so a renamed ad CDN path is
+# still removed even when HLS_AD_PATTERNS no longer matches.
 # Segment URIs are absolutized directly in awk for high performance, and URI
 # attributes of #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA lines are rewritten the
 # same way so the cached local playlist still references remote keys/maps.
@@ -298,6 +305,17 @@ hls_strip_ads() {
 
             # Segment URI line (non-comment, non-empty).
             if ($0 !~ /^#/ && $0 != "") {
+                # Tier 2 candidate block (opened by METHOD=NONE): any segment
+                # outside the playlist directory is an ad until movie content
+                # appears. seg_is_movie is checked first so own-dir segments
+                # are never dropped and close the block.
+                if (cand && !seg_is_movie($0)) {
+                    in_ad = 1
+                    had_ad = 1
+                    pend_n = 0
+                    ad_pend_n = 0
+                    next
+                }
                 if ($0 ~ adpat && !seg_is_movie($0)) {
                     in_ad = 1
                     had_ad = 1
@@ -309,6 +327,7 @@ hls_strip_ads() {
                 if (in_ad) {
                     in_ad = 0
                 }
+                cand = 0
                 if (had_ad) {
                     if (movie_count > 0) {
                         print "#EXT-X-DISCONTINUITY"
@@ -330,6 +349,7 @@ hls_strip_ads() {
             # ENDLIST must terminate ad block and pass through
             if ($0 ~ /^#EXT-X-ENDLIST/) {
                 in_ad = 0
+                cand = 0
                 pend_n = 0
                 ad_pend_n = 0
                 print
@@ -338,6 +358,7 @@ hls_strip_ads() {
 
             # Tag lines inside ad block
             if (in_ad) {
+                if ($0 ~ /^#EXT-X-KEY/ && $0 ~ /METHOD=NONE/) { cand = 1 }
                 if ($0 ~ /^#EXTINF/) {
                     ad_pend[ad_pend_n++] = $0
                 } else if ($0 ~ /^#EXT-X-KEY/ && $0 !~ /METHOD=NONE/) {
@@ -352,6 +373,7 @@ hls_strip_ads() {
                 next
             }
             if ($0 ~ /^#EXT-X-KEY/) {
+                if ($0 ~ /METHOD=NONE/) { cand = 1 }
                 pend[pend_n++] = rewrite_uri($0)
                 next
             }
@@ -430,10 +452,14 @@ hls_fallback_url() {
 # PTS restarts at ~1.48s; the CDN brackets them with #EXT-X-DISCONTINUITY.
 # Seeking into or across such a cluster makes mpv skip past it or reset to
 # ~1.5s (looks like a restart from the beginning). This rebases each convertv
-# clip onto the movie timeline. The clip is downloaded (cached under
-# $CACHE/segments/) and stream-copied with a constant PTS offset so its first
-# video PTS equals the running cursor (end of the movie segment preceding the
-# cluster, then the end of each rebased clip):
+# clip onto the movie timeline. Consecutive convertv clips form a cluster;
+# each cluster is anchored on the movie segment immediately before it (empty
+# anchor at playlist start = cursor 0) and chained from there, so a playlist
+# with several clusters separated by movie content keeps every cluster on its
+# own timeline. The clip is downloaded (cached under $CACHE/segments/) and
+# stream-copied with a constant PTS offset so its first video PTS equals the
+# running cursor (anchor end, then the end of each rebased clip in the
+# cluster):
 #   ffmpeg -loglevel error -nostdin -y -itsoffset <cursor-first_pts> -i <in> \
 #          -c copy -copyts -muxdelay 0 -muxpreload 0 -f mpegts <out>
 # -itsoffset shifts every packet and -copyts keeps the shifted timestamps
@@ -454,7 +480,7 @@ hls_fallback_url() {
 hls_rebase_convertv() {
     local in="$1" out="$2" base="$3"
     local segdir="$CACHE/segments"
-    local line prev_uri="" first_prev="" seen_first=0 cursor=0
+    local line prev_uri="" cursor=0
     local abs hash src dst shift out_pts p_first p_last fdur map rc uri dst_first
     local -a clips=() rebased=()
 
@@ -484,16 +510,22 @@ hls_rebase_convertv() {
         awk -v r="$rate" 'BEGIN{split(r,a,"/"); if (a[1]+0 > 0 && a[2]+0 > 0) printf "%.6f", a[2]/a[1]; else print "0"}'
     }
 
-    # Convertv clips in playlist order, plus the movie segment immediately
-    # before the first one (the cursor anchor).
+    # Convertv clips in playlist order, grouped into clusters: consecutive
+    # convertv lines share one anchor, the movie segment immediately before the
+    # first clip of the cluster (empty when the cluster starts the playlist).
+    local -a cluster_anchor=() cluster_first=()
+    local in_cluster=0
     while IFS= read -r line; do
         [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
         if [[ "$line" =~ convertv[0-9]*/ ]]; then
-            if [[ $seen_first -eq 0 ]]; then
-                first_prev="$prev_uri"
-                seen_first=1
+            if [[ $in_cluster -eq 0 ]]; then
+                cluster_anchor+=("$prev_uri")
+                cluster_first+=("${#clips[@]}")
+                in_cluster=1
             fi
             clips+=("$line")
+        else
+            in_cluster=0
         fi
         prev_uri="$line"
     done < "$in"
@@ -504,22 +536,24 @@ hls_rebase_convertv() {
     # Resolve every source file first and prefetch the missing ones in
     # parallel batches (4 at a time) so the first play does not wait for seven
     # sequential downloads.
-    local -a urls=() hashes=() srcs=() need_urls=() need_files=()
-    local prev_abs="" prev_src=""
-    if [[ -n "$first_prev" ]]; then
-        prev_abs=$(hls_absolutize_url "$base" "$first_prev")
-        prev_src="$segdir/$(hash_url "$prev_abs").ts"
-    fi
+    local -a urls=() hashes=() srcs=() need_urls=() need_files=() anchorsrc=()
+    local ci a h
+    for ((ci = 0; ci < ${#cluster_anchor[@]}; ci++)); do
+        if [[ -z "${cluster_anchor[ci]}" ]]; then
+            anchorsrc[ci]=""
+            continue
+        fi
+        a=$(hls_absolutize_url "$base" "${cluster_anchor[ci]}")
+        h=$(hash_url "$a")
+        anchorsrc[ci]="$segdir/$h.ts"
+        [[ -s "${anchorsrc[ci]}" ]] || { need_urls+=("$a"); need_files+=("${anchorsrc[ci]}"); }
+    done
     for uri in "${clips[@]}"; do
-        local a h
         a=$(hls_absolutize_url "$base" "$uri")
         h=$(hash_url "$a")
         urls+=("$a"); hashes+=("$h"); srcs+=("$segdir/$h.ts")
         [[ -s "$segdir/$h.ts" ]] || { need_urls+=("$a"); need_files+=("$segdir/$h.ts"); }
     done
-    if [[ -n "$prev_src" && ! -s "$prev_src" ]]; then
-        need_urls+=("$prev_abs"); need_files+=("$prev_src")
-    fi
     if (( ${#need_urls[@]} > 0 )); then
         printf '  Đang tải %d đoạn cần ghép...\n' "${#need_urls[@]}" >&2
         local i j
@@ -537,67 +571,78 @@ hls_rebase_convertv() {
         done
     fi
 
-    if [[ -n "$prev_src" ]]; then
-        out_pts=$(_rebase_pts "$prev_src") || return 1
-        read -r p_first p_last <<< "$out_pts"
-        fdur=$(_rebase_framedur "$prev_src")
-        cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
-    fi
-
-    local idx
-    for idx in "${!clips[@]}"; do
-        abs="${urls[idx]}"
-        hash="${hashes[idx]}"
-        src="${srcs[idx]}"
-        dst="$segdir/$hash-r.ts"
-
-        # Cached rebased clip is usable only when it still starts at the
-        # current cursor (the same URI may be republished in another timeline).
-        if [[ -s "$dst" ]]; then
-            local dst_pts
-            dst_pts=$(_rebase_pts "$dst") || return 1
-            read -r dst_first p_last <<< "$dst_pts"
-            if awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}'; then
-                rebased+=("$dst")
-                fdur=$(_rebase_framedur "$dst")
-                cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
-                continue
-            fi
-        fi
-
-        [[ -s "$src" ]] || _rebase_fetch "$abs" "$src" || return 1
-        out_pts=$(_rebase_pts "$src") || return 1
-        read -r p_first p_last <<< "$out_pts"
-
-        # Write to a temp name so an interrupted rebase can never leave a
-        # truncated dst that the cursor check might mistake for a good one.
-        printf '  Đang ghép đoạn tài trợ %d/%d...\n' "$((idx + 1))" "${#clips[@]}" >&2
-        local dst_tmp="$dst.part.$$"
-        shift=$(awk -v c="$cursor" -v f="$p_first" 'BEGIN{printf "%.6f", c-f}')
-        if [[ "$shift" == -* ]]; then
-            ffmpeg -loglevel error -nostdin -y -i "$src" -c copy -muxdelay 0 -muxpreload 0 \
-                -output_ts_offset "$cursor" -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+    # Rebase each cluster from its own anchor, in playlist order; rebased[] is
+    # appended in playlist order so the i-th convertv line maps to the i-th
+    # rebased path in the final rewrite.
+    local c idx=0 end
+    for c in "${!cluster_anchor[@]}"; do
+        if [[ -n "${anchorsrc[c]}" ]]; then
+            out_pts=$(_rebase_pts "${anchorsrc[c]}") || return 1
+            read -r p_first p_last <<< "$out_pts"
+            fdur=$(_rebase_framedur "${anchorsrc[c]}")
+            cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
         else
-            ffmpeg -loglevel error -nostdin -y -itsoffset "$shift" -i "$src" -c copy -copyts \
-                -muxdelay 0 -muxpreload 0 -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+            cursor=0
         fi
-        [[ -s "$dst_tmp" ]] || { rm -f "$dst_tmp"; return 1; }
+        if (( c + 1 < ${#cluster_anchor[@]} )); then
+            end=${cluster_first[c + 1]}
+        else
+            end=${#clips[@]}
+        fi
+        for ((; idx < end; idx++)); do
+            abs="${urls[idx]}"
+            hash="${hashes[idx]}"
+            src="${srcs[idx]}"
+            dst="$segdir/$hash-r.ts"
 
-        # The stream codecs must survive the stream copy (video + audio).
-        local src_codecs dst_codecs
-        src_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$src" 2>/dev/null | sort -u | tr '\n' ' ')
-        dst_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$dst_tmp" 2>/dev/null | sort -u | tr '\n' ' ')
-        [[ -n "$src_codecs" && "$src_codecs" == "$dst_codecs" ]] || { rm -f "$dst_tmp"; return 1; }
+            # Cached rebased clip is usable only when it still starts at the
+            # current cursor (the same URI may be republished in another timeline).
+            if [[ -s "$dst" ]]; then
+                local dst_pts
+                dst_pts=$(_rebase_pts "$dst") || return 1
+                read -r dst_first p_last <<< "$dst_pts"
+                if awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}'; then
+                    rebased+=("$dst")
+                    fdur=$(_rebase_framedur "$dst")
+                    cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
+                    continue
+                fi
+            fi
 
-        out_pts=$(_rebase_pts "$dst_tmp") || { rm -f "$dst_tmp"; return 1; }
-        read -r dst_first p_last <<< "$out_pts"
-        # The stream copy must have landed the clip exactly on the cursor.
-        awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}' \
-            || { rm -f "$dst_tmp"; return 1; }
-        fdur=$(_rebase_framedur "$dst_tmp")
-        cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
-        mv -f "$dst_tmp" "$dst" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
-        rebased+=("$dst")
+            [[ -s "$src" ]] || _rebase_fetch "$abs" "$src" || return 1
+            out_pts=$(_rebase_pts "$src") || return 1
+            read -r p_first p_last <<< "$out_pts"
+
+            # Write to a temp name so an interrupted rebase can never leave a
+            # truncated dst that the cursor check might mistake for a good one.
+            printf '  Đang ghép đoạn tài trợ %d/%d...\n' "$((idx + 1))" "${#clips[@]}" >&2
+            local dst_tmp="$dst.part.$$"
+            shift=$(awk -v c="$cursor" -v f="$p_first" 'BEGIN{printf "%.6f", c-f}')
+            if [[ "$shift" == -* ]]; then
+                ffmpeg -loglevel error -nostdin -y -i "$src" -c copy -muxdelay 0 -muxpreload 0 \
+                    -output_ts_offset "$cursor" -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+            else
+                ffmpeg -loglevel error -nostdin -y -itsoffset "$shift" -i "$src" -c copy -copyts \
+                    -muxdelay 0 -muxpreload 0 -f mpegts "$dst_tmp" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+            fi
+            [[ -s "$dst_tmp" ]] || { rm -f "$dst_tmp"; return 1; }
+
+            # The stream codecs must survive the stream copy (video + audio).
+            local src_codecs dst_codecs
+            src_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$src" 2>/dev/null | sort -u | tr '\n' ' ')
+            dst_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$dst_tmp" 2>/dev/null | sort -u | tr '\n' ' ')
+            [[ -n "$src_codecs" && "$src_codecs" == "$dst_codecs" ]] || { rm -f "$dst_tmp"; return 1; }
+
+            out_pts=$(_rebase_pts "$dst_tmp") || { rm -f "$dst_tmp"; return 1; }
+            read -r dst_first p_last <<< "$out_pts"
+            # The stream copy must have landed the clip exactly on the cursor.
+            awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}' \
+                || { rm -f "$dst_tmp"; return 1; }
+            fdur=$(_rebase_framedur "$dst_tmp")
+            cursor=$(awk -v l="$p_last" -v d="$fdur" 'BEGIN{printf "%.6f", l+d}')
+            mv -f "$dst_tmp" "$dst" 2>/dev/null || { rm -f "$dst_tmp"; return 1; }
+            rebased+=("$dst")
+        done
     done
 
     map=$(mktemp "$CACHE/.rebase.XXXXXX" 2>/dev/null) || map="$CACHE/.rebase-$$.map"
@@ -924,7 +969,13 @@ play_video() {
 
     case "$PLAYER_DEFAULT" in
         vlc)
-            local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" "${extra_args[@]}")
+            # Accurate seek + remote-stream buffering for the cleaned HLS
+            # playlist: --no-input-fast-seek makes seeks land on the requested
+            # time instead of the previous keyframe, --network-caching=3000
+            # rides out CDN hiccups on segment fetches. Both are safe for
+            # local/non-HLS playback; --preferred-resolution is kept as-is.
+            local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" \
+                "--no-input-fast-seek" "--network-caching=3000" "${extra_args[@]}")
             [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
             vlc "${vlc_args[@]}" >/dev/null 2>&1 &
             LAST_PLAYER_PID=$!

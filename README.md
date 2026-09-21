@@ -109,9 +109,10 @@ Tự tạo tại `~/.config/sudachi/`:
 
 Với phim từ phimapi, khối quảng cáo chèn giữa tập được lọc trước khi phát — tua tới/lui không còn nhảy về đầu.
 
-- Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`
+- Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`. Khối segment ngoài thư mục phim ngay sau `#EXT-X-KEY:METHOD=NONE` cũng bị coi là quảng cáo, kể cả khi CDN đổi tên đường dẫn; segment trong đúng thư mục phim không bao giờ bị cắt
 - **Chất lượng** (Cài đặt → Chất lượng) chọn đúng variant HLS: mặc định bản cao nhất, chọn 720p sẽ lấy variant ≤ 720p
-- Clip `convertv*` là cảnh phim thật kèm text tài trợ nhưng bị CDN đặt lại mốc thời gian; `ffmpeg` ghép chúng về đúng dòng thời gian phim nên tua qua đoạn này đứng yên. Thiếu `ffmpeg`/`ffprobe` thì giữ nguyên dấu `DISCONTINUITY` — vẫn phát bình thường
+- Clip `convertv*` là cảnh phim thật kèm text tài trợ nhưng bị CDN đặt lại mốc thời gian; `ffmpeg` ghép chúng về đúng dòng thời gian phim nên tua qua đoạn này đứng yên. Các clip liền nhau thành từng cụm, mỗi cụm neo vào segment phim ngay trước nó — playlist nhiều cụm vẫn ghép đúng. Thiếu `ffmpeg`/`ffprobe` thì giữ nguyên dấu `DISCONTINUITY` — vẫn phát bình thường
+- Phát bằng VLC: thêm `--no-input-fast-seek` (tua chính xác) và `--network-caching=3000` (đệm segment từ xa); tùy chọn chất lượng giữ nguyên
 - Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
 - Tải phim (Tab) giữ nguyên stream gốc (có ad) — chỉ lọc khi phát
 
