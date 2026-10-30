@@ -6,7 +6,6 @@ HIST="$CONF/history.log"
 FAV="$CONF/favorites.log"
 PROGRESS="$CONF/progress.log"
 CACHE="$CONF/cache"
-SOURCE_FILE="$CONF/source.conf"
 CONFIG_FILE="$CONF/config"
 PLAYER_DEFAULT="mpv"
 QUALITY=""
@@ -20,9 +19,20 @@ mkdir -p "$CONF" "$DL" "$CACHE"
 TEMP_FILES=()
 [ ! -f "$PROGRESS" ] && touch "$PROGRESS"
 
-API_SOURCE="phimapi"
 API_PHIMAPI="https://phimapi.com"
-API_OPHIM1="https://ophim1.com"
+API_VSMOV="https://vsmov.com/api"
+SOURCE="vsmov"
+API_BASE="$API_VSMOV"
+USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+VS_PROXY_PID=""
+VS_PROXY_URL=""
+
+set_api_base() {
+    case "$SOURCE" in
+        phimapi) API_BASE="$API_PHIMAPI" ;;
+        *)       SOURCE="vsmov"; API_BASE="$API_VSMOV" ;;
+    esac
+}
 
 I_SEARCH="󱇓 "
 I_NEW="󰎁 "
@@ -31,12 +41,12 @@ I_FILTER="󱄤 "
 I_HIST="󰋚 "
 I_FAV="󰋑 "
 I_SOURCE="󰳏 "
-I_PLAYER=" "
 I_SETTINGS="󰒓 "
 I_DIR=" "
 I_EXIT="󰈆 "
 I_ANIME=" "
 I_QUA="󱤵 "
+I_PLAYER=" "
 I_CACHE="󰃢 "
 
 C_G='\033[1;32m'
@@ -46,14 +56,7 @@ C_M='\033[1;35m'
 C_R='\033[0m'
 
 load_settings() {
-    local line key value raw_source
-
-    if [[ -f "$SOURCE_FILE" ]]; then
-        IFS= read -r raw_source < "$SOURCE_FILE" || raw_source=""
-        case "$raw_source" in
-            ophim1|phimapi) API_SOURCE="$raw_source" ;;
-        esac
-    fi
+    local line key value
 
     [[ -f "$CONFIG_FILE" ]] || return
 
@@ -91,6 +94,11 @@ load_settings() {
                     *) AD_BLOCK=1 ;;
                 esac
                 ;;
+            SOURCE)
+                case "$value" in
+                    phimapi|vsmov) SOURCE="$value" ;;
+                esac
+                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -100,8 +108,8 @@ save_settings() {
         printf 'PLAYER_DEFAULT=%s\n' "$PLAYER_DEFAULT"
         printf 'QUALITY=%s\n' "$QUALITY"
         printf 'AD_BLOCK=%s\n' "$AD_BLOCK"
+        printf 'SOURCE=%s\n' "$SOURCE"
     } > "$CONFIG_FILE"
-    printf '%s\n' "$API_SOURCE" > "$SOURCE_FILE"
 }
 
 add_menu_numbers() {
@@ -171,10 +179,18 @@ check_dependencies() {
         echo -e "${C_C}  Debian: sudo apt install ${missing[*]}${C_R}"
         exit 1
     fi
+
+    # VSMov video needs the local PNG-stripping proxy.
+    if [[ "$SOURCE" == "vsmov" ]] && ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${C_Y}VSMov cần python3, tạm chuyển sang PhimAPI.${C_R}"
+        SOURCE="phimapi"
+        set_api_base
+    fi
 }
 
 
 cleanup() {
+    stop_vsmov_proxy
     for tmpfile in "${TEMP_FILES[@]}"; do
         [[ -f "$tmpfile" ]] && rm -f "$tmpfile"
     done
@@ -431,16 +447,19 @@ hls_pick_variant() {
                 }
                 if (best < 0) best = 0
             }
+            # No RESOLUTION attribute anywhere: still return a variant instead
+            # of nothing, otherwise the caller falls back to the raw master
+            # playlist and ads come back.
+            if (best < 1 && n > 0) best = 1
             if (best > 0) print vu[best]
         }
     ' <<< "$1"
 }
 
-# hls_fallback_url <clean-file> <original-url> -- prefer an already cleaned
-# cached playlist when a refetch fails (transient CDN/network errors must not
-# silently serve ads); fall back to the original URL when no cache exists.
+# hls_fallback_url <clean-file> <original-url> -- reuse a recent cleaned
+# playlist; segment URLs expire, so a stale cache is worse than the raw URL.
 hls_fallback_url() {
-    if [[ -s "$1" ]]; then
+    if [[ -s "$1" ]] && is_cache_fresh "$1" 21600; then
         printf '%s' "$1"
     else
         printf '%s' "$2"
@@ -664,18 +683,15 @@ hls_rebase_convertv() {
     return 0
 }
 
-# hls_fetch_clean <url> -- fetch an HLS playlist (master or media), strip ad
-# segments via hls_strip_ads, absolutize segment URIs, rebase convertv sponsor
-# clips via hls_rebase_convertv, cache the result as $CACHE/<hash>-clean.m3u8
-# and echo its local path. For a master playlist the variant matching QUALITY
-# is fetched (highest resolution when QUALITY is empty). On a fetch failure the
-# cached cleaned playlist is reused when available; with no cache the original
-# url is echoed unchanged. Always returns 0 (silent fallback: playback must
-# never break).
+# hls_fetch_clean <url> [play|dl] -- strip ad segments and cache the cleaned
+# playlist as $CACHE/<hash>-clean.m3u8 (or -dl.m3u8). Play mode also rebases
+# convertv clips. A fetch failure reuses a recent cache, then the raw URL.
 hls_fetch_clean() {
-    local url="$1" master variant media out tmp tmp2 hash clean
+    local url="$1" mode="${2:-play}"
+    local master variant media out tmp tmp2 hash clean suffix
+    [[ "$mode" == "dl" ]] && suffix="-dl" || suffix="-clean"
     hash=$(hash_url "$url")
-    clean="$CACHE/$hash-clean.m3u8"
+    clean="$CACHE/$hash$suffix.m3u8"
 
     master=$(curl -fsS --connect-timeout 10 --max-time 10 "$url" 2>/dev/null) || {
         hls_fallback_url "$clean" "$url"
@@ -699,6 +715,12 @@ hls_fetch_clean() {
         hls_fallback_url "$clean" "$url"
         return 0
     }
+    # A 200 may be an HTML/JSON error page; never cache that as a playlist.
+    if ! printf '%s\n' "$out" | grep -q '^#EXTM3U'; then
+        log_debug "hls_fetch_clean: $media is not an m3u8 playlist — using fallback"
+        hls_fallback_url "$clean" "$url"
+        return 0
+    fi
     # Canary: many DISCONTINUITY tags but zero ad-pattern matches means the
     # CDN likely changed its ad URI layout -- flag it so HLS_AD_PATTERNS can
     # be updated before users just accept the ads returning.
@@ -708,13 +730,14 @@ hls_fetch_clean() {
     fi
     tmp=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp="$CACHE/.tmp-$$.m3u8"
     if printf '%s\n' "$out" | hls_strip_ads "$media" > "$tmp"; then
-        # Rebase convertv sponsor clips onto the movie timeline when possible;
-        # any failure (no ffmpeg, download/probe/rebase error) keeps tmp.
-        tmp2=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp2="$CACHE/.tmp2-$$.m3u8"
-        if hls_rebase_convertv "$tmp" "$tmp2" "$media"; then
-            mv -f "$tmp2" "$tmp" 2>/dev/null || rm -f "$tmp2"
-        else
-            rm -f "$tmp2"
+        # Downloads skip convertv rebasing: yt-dlp handles the remote clips.
+        if [[ "$mode" != "dl" ]]; then
+            tmp2=$(mktemp "$CACHE/.clean.XXXXXX.m3u8" 2>/dev/null) || tmp2="$CACHE/.tmp2-$$.m3u8"
+            if hls_rebase_convertv "$tmp" "$tmp2" "$media"; then
+                mv -f "$tmp2" "$tmp" 2>/dev/null || rm -f "$tmp2"
+            else
+                rm -f "$tmp2"
+            fi
         fi
         if [[ -s "$tmp" ]] && mv -f "$tmp" "$clean" 2>/dev/null; then
             echo "$clean"
@@ -729,6 +752,298 @@ hls_fetch_clean() {
         return 0
     fi
 }
+
+# parse_vsmov_player_page -- read a player page on stdin and echo its playlist URL.
+parse_vsmov_player_page() {
+    local page base hash signed enabled
+    page=$(cat)
+    base=$(sed -n 's/.*baseUrl[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$page" | head -1)
+    hash=$(sed -n 's/.*videoHash[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$page" | head -1)
+    signed=$(sed -n 's/.*signedMasterUrl"*[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$page" | head -1)
+    enabled=$(sed -n 's/.*enableSignedUrl"*[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' <<< "$page" | head -1)
+
+    if [[ "$enabled" == "true" && -n "$signed" ]]; then
+        printf '%s' "$signed"
+    elif [[ -n "$base" && -n "$hash" ]]; then
+        printf '%s/stream/%s/master.m3u8' "${base%/}" "$hash"
+    fi
+}
+
+# resolve_stream_url <url> -- VSMov entries carry a player page; extract its playlist.
+resolve_stream_url() {
+    local url="$1" page resolved
+
+    case "$url" in
+        *.m3u8*) printf '%s' "$url"; return 0 ;;
+    esac
+    if [[ "$url" != *"streamvsmov.com"* ]]; then
+        printf '%s' "$url"
+        return 0
+    fi
+
+    page=$(curl -fsS -A "$USER_AGENT" -e "https://vsmov.com/" \
+        --connect-timeout 10 --max-time 15 "$url" 2>/dev/null) || {
+        log_debug "resolve_stream_url: fetch failed for $url"
+        printf '%s' "$url"
+        return 0
+    }
+    resolved=$(parse_vsmov_player_page <<< "$page")
+    if [[ -z "$resolved" ]]; then
+        log_debug "resolve_stream_url: cannot parse $url"
+        printf '%s' "$url"
+        return 0
+    fi
+    resolved=$(printf '%s' "$resolved" | sed 's|\\/|/|g')
+    if [[ "$resolved" != http* ]]; then
+        resolved=$(hls_absolutize_url "$url" "$resolved")
+    fi
+    printf '%s' "$resolved"
+}
+
+# resolve_saved_url <slug> <ep> [stored-url] -- refresh a history link; never
+# resolve a stored URL from the other source because slugs can collide.
+resolve_saved_url() {
+    local slug="$1" ep="$2" stored="${3:-}" res url
+
+    [[ -n "$slug" && -n "$ep" ]] || return 0
+    if [[ -n "$stored" ]]; then
+        case "$stored" in
+            *streamvsmov*) [[ "$SOURCE" == "vsmov" ]] || return 0 ;;
+            *)             [[ "$SOURCE" == "phimapi" ]] || return 0 ;;
+        esac
+    fi
+    res=$(call_api "/phim/$slug") || return 0
+    url=$(jq -r --arg ep "$ep" '
+        [.episodes[]?.server_data[]? | select(.name == $ep)] | .[0] |
+        if . == null then empty
+        elif (.link_m3u8 // "") != "" then .link_m3u8
+        else (.link_embed // "") end
+    ' <<< "$res" 2>/dev/null)
+    printf '%s' "$url"
+}
+
+# create_vsmov_proxy_script -- cache the PNG-stripping proxy. VSMov wraps each
+# TS segment in a PNG header, which ffmpeg refuses to read.
+create_vsmov_proxy_script() {
+    local script="$CACHE/vsmov-proxy.py" tmp
+    if [[ -s "$script" ]] && grep -q '^# vsmov-proxy v2' "$script"; then
+        return 0
+    fi
+    tmp=$(mktemp "$CACHE/vsmov-proxy.XXXXXX.py") || return 1
+    cat > "$tmp" <<'PY'
+#!/usr/bin/env python3
+# vsmov-proxy v2
+import base64
+import sys
+import threading
+import urllib.parse
+import urllib.request
+from collections import OrderedDict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+CACHE = OrderedDict()
+CACHE_MAX = 12
+CACHE_LOCK = threading.Lock()
+ROOT = ""
+
+
+def fetch(url):
+    with CACHE_LOCK:
+        body = CACHE.get(url)
+        if body is not None:
+            CACHE.move_to_end(url)
+            return body
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Referer": "https://v9.streamvsmov.com/",
+        "Accept": "*/*",
+    })
+    with urllib.request.urlopen(req, timeout=30) as res:
+        body = res.read()
+    with CACHE_LOCK:
+        CACHE[url] = body
+        while len(CACHE) > CACHE_MAX:
+            CACHE.popitem(last=False)
+    return body
+
+
+def strip_png(body):
+    if not body.startswith(b"\x89PNG"):
+        return body
+    limit = min(len(body), 8192)
+    for off in range(limit):
+        if (body[off] == 0x47
+                and body[off + 188:off + 189] == b"\x47"
+                and body[off + 376:off + 377] == b"\x47"):
+            return body[off:]
+    return body
+
+
+def enc(url):
+    return base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+
+
+def dec(token):
+    return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+
+
+def rewrite_playlist(text, base, prefix):
+    out = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            out.append(line)
+        elif line.strip():
+            url = urllib.parse.urljoin(base, line.strip())
+            if ".m3u8" in url.lower():
+                out.append("%s/playlist/%s.m3u8" % (prefix, enc(url)))
+            else:
+                out.append("%s/seg/%s.ts" % (prefix, enc(url)))
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def send_body(self, body, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        prefix = "http://127.0.0.1:%d" % self.server.server_address[1]
+        path = self.path.split("?", 1)[0]
+        try:
+            if path.startswith("/seg/"):
+                token = path[5:]
+                if token.endswith(".ts"):
+                    token = token[:-3]
+                self.send_body(strip_png(fetch(dec(token))), "video/mp2t")
+            elif path.startswith("/playlist/"):
+                token = path[10:]
+                if token.endswith(".m3u8"):
+                    token = token[:-5]
+                url = dec(token)
+                text = fetch(url).decode("utf-8", "replace")
+                self.send_body(rewrite_playlist(text, url, prefix).encode(),
+                               "application/vnd.apple.mpegurl")
+            else:
+                text = fetch(ROOT).decode("utf-8", "replace")
+                self.send_body(rewrite_playlist(text, ROOT, prefix).encode(),
+                               "application/vnd.apple.mpegurl")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            try:
+                self.send_error(502, str(exc))
+            except Exception:
+                pass
+
+
+def selftest():
+    header = b"\x89PNG\r\n\x1a\n" + b"\x00" * 80 + b"\xff" * 60
+    ts = (b"\x47" + b"\x00" * 187) * 3
+    out = strip_png(header + ts)
+    if not out.startswith(b"\x47") or len(out) != len(ts):
+        print("selftest failed", file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def main():
+    global ROOT
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        return selftest()
+    if len(sys.argv) < 4:
+        print("usage: vsmov-proxy.py <port> <portfile> <playlist-url>", file=sys.stderr)
+        return 2
+    port = int(sys.argv[1])
+    portfile = sys.argv[2]
+    ROOT = sys.argv[3]
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    with open(portfile, "w") as handle:
+        handle.write(str(server.server_address[1]))
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+    if ! mv -f "$tmp" "$script" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# start_vsmov_proxy <playlist-url> -- set VS_PROXY_URL to a local proxy playlist.
+start_vsmov_proxy() {
+    local url="$1" script portfile port i proxy_url seed attempt
+
+    command -v python3 >/dev/null 2>&1 || { log_debug "vsmov proxy: python3 missing"; return 1; }
+    create_vsmov_proxy_script || return 1
+    stop_vsmov_proxy
+    script="$CACHE/vsmov-proxy.py"
+    portfile=$(mktemp "$CACHE/vsmov-proxy.XXXXXX.port") || return 1
+
+    # Stable port keeps mpv's watch-later key (and resume) across runs.
+    seed=$(printf '%s' "$url" | cksum | cut -d' ' -f1)
+    [[ "$seed" =~ ^[0-9]+$ ]] || seed=0
+    port=""
+    for attempt in $(seq 0 9); do
+        : > "$portfile"
+        python3 "$script" "$((17000 + seed % 1000 + attempt))" "$portfile" "$url" \
+            >>"$CACHE/vsmov-proxy.log" 2>&1 &
+        VS_PROXY_PID=$!
+        for i in $(seq 1 50); do
+            if [[ -s "$portfile" ]]; then
+                port=$(<"$portfile")
+                break
+            fi
+            kill -0 "$VS_PROXY_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        [[ -n "$port" ]] && break
+        stop_vsmov_proxy
+    done
+    rm -f "$portfile"
+    if [[ -z "$port" ]]; then
+        stop_vsmov_proxy
+        log_debug "vsmov proxy: no port for $url"
+        return 1
+    fi
+
+    proxy_url="http://127.0.0.1:$port/master.m3u8"
+    for i in 1 2 3 4 5; do
+        if curl -fsS --max-time 10 "$proxy_url" -o /dev/null 2>/dev/null; then
+            VS_PROXY_URL="$proxy_url"
+            return 0
+        fi
+        sleep 0.2
+    done
+    stop_vsmov_proxy
+    log_debug "vsmov proxy: not ready for $url"
+    return 1
+}
+
+stop_vsmov_proxy() {
+    if [[ -n "$VS_PROXY_PID" ]]; then
+        kill "$VS_PROXY_PID" 2>/dev/null
+        wait "$VS_PROXY_PID" 2>/dev/null
+        VS_PROXY_PID=""
+    fi
+    VS_PROXY_URL=""
+}
+
 
 is_cache_fresh() {
     local file="$1" max_age="$2" now mtime
@@ -748,19 +1063,9 @@ sanitize_field() {
     printf '%s' "$value"
 }
 
-get_base_url() {
-    case "$API_SOURCE" in
-        phimapi)   echo "$API_PHIMAPI" ;;
-        *)         echo "$API_OPHIM1" ;;
-    esac
-}
-
-
 call_api() {
     local endpoint="$1"
-    local base_url
-    base_url=$(get_base_url)
-    local url="${base_url}${endpoint}"
+    local url="${API_BASE}${endpoint}"
 
 
     local cache_key
@@ -780,7 +1085,7 @@ call_api() {
     local res attempt
     for attempt in 1 2 3; do
         res=$(curl -fsS --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
-        if jq -e '(. != null) and (.status != "error") and (has("error") | not)' <<< "$res" >/dev/null 2>&1; then
+        if jq -e '(. != null) and (.status != "error") and (.status != false) and (has("error") | not)' <<< "$res" >/dev/null 2>&1; then
             echo "$res" > "$cache_file"
             echo "$res"
             return
@@ -794,9 +1099,10 @@ call_api() {
 }
 
 record_history() {
-    local slug="$1" title="$2" url="$3" tmp safe_title safe_url
+    local slug="$1" title="$2" url="$3" ep="${4:-}" tmp safe_title safe_url safe_ep
     safe_title=$(sanitize_field "$title")
     safe_url=$(sanitize_field "$url")
+    safe_ep=$(sanitize_field "$ep")
 
     tmp=$(mktemp "$CACHE/history.XXXXXX") || return 1
 
@@ -806,7 +1112,7 @@ record_history() {
     fi
 
     printf -v now '%(%s)T' -1
-    printf '%s|%s|%s|%s\n' "$now" "$safe_title" "$slug" "$safe_url" >> "$tmp"
+    printf '%s|%s|%s|%s|%s\n' "$now" "$safe_title" "$slug" "$safe_url" "$safe_ep" >> "$tmp"
     mv "$tmp" "$HIST"
 }
 
@@ -870,6 +1176,30 @@ download_episode() {
         return 1
     fi
 
+    local is_vsmov=0
+    if [[ "$url" == *"streamvsmov.com"* ]]; then
+        is_vsmov=1
+        url=$(resolve_stream_url "$url")
+        if [[ "$url" != *".m3u8"* ]]; then
+            show_error "Không lấy được link tải"
+            return 1
+        fi
+    fi
+
+    # PhimAPI: strip ads from the playlist; yt-dlp handles the remote clips.
+    local dl_url="$url" dl_local=0 clean
+    if [[ $is_vsmov -eq 0 && "$AD_BLOCK" == "1" && "$url" == *".m3u8"* ]]; then
+        clean=$(hls_fetch_clean "$url" dl)
+        if [[ "$clean" == http* ]]; then
+            dl_url="$clean"
+        else
+            dl_url="file://$clean"
+            dl_local=1
+        fi
+    fi
+
+    local row_title
+    row_title=$(sanitize_field "$title")
     local safe_title
     safe_title=$(printf '%s' "$title" | sed 's|[/\\:*?"<>|]| - |g' | tr -s ' ' | sed 's/^ *//;s/ *$//' | tr ' ' '_')
     file="${safe_title:-sudachi_$(date +%s)}.mp4"
@@ -879,20 +1209,38 @@ download_episode() {
     log_file="$CACHE/downloads/$(date +%s)_${file}.log"
 
     (
-        if command -v aria2c >/dev/null 2>&1; then
-            yt-dlp "$url" -o "$DL/$file" --downloader aria2c -N 8 > "$log_file" 2>&1
+        # The subshell owns its proxy; do not touch a playback proxy.
+        VS_PROXY_PID=""
+        VS_PROXY_URL=""
+        trap 'stop_vsmov_proxy' EXIT
+        local rc
+        if [[ $is_vsmov -eq 1 ]]; then
+            if ! start_vsmov_proxy "$url"; then
+                echo "Không khởi động được proxy VSMov" > "$log_file"
+                rc=1
+            else
+                yt-dlp "$VS_PROXY_URL" -o "$DL/$file" -N 8 > "$log_file" 2>&1
+                rc=$?
+                stop_vsmov_proxy
+            fi
+        elif [[ $dl_local -eq 1 ]]; then
+            yt-dlp --enable-file-urls -N 8 "$dl_url" -o "$DL/$file" > "$log_file" 2>&1
+            rc=$?
+        elif command -v aria2c >/dev/null 2>&1; then
+            yt-dlp "$dl_url" -o "$DL/$file" --downloader aria2c -N 8 > "$log_file" 2>&1
+            rc=$?
         else
-            yt-dlp "$url" -o "$DL/$file" > "$log_file" 2>&1
+            yt-dlp "$dl_url" -o "$DL/$file" > "$log_file" 2>&1
+            rc=$?
         fi
-        local rc=$?
+        printf '%s\n' "$rc" > "$log_file.rc"
         if [[ $rc -eq 0 ]]; then
             command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" "✅ Tải xong: $title"
         else
             command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Sudachi" "❌ Lỗi khi tải: $title"
         fi
     ) &
-    local dl_pid=$!
-    printf '%s|%s|%s|%s\n' "$dl_pid" "$title" "$file" "$log_file" >> "$CACHE/downloads/tasks.log"
+    printf '%s|%s|%s\n' "$row_title" "$file" "$log_file" >> "$CACHE/downloads/tasks.log"
 
     command -v notify-send >/dev/null 2>&1 && notify-send "Sudachi" "⬇ Đang tải: $title"
     echo -e "${C_G}  Đang tải: $title${C_R}"
@@ -904,28 +1252,41 @@ view_downloads() {
     local task_file="$CACHE/downloads/tasks.log"
     [[ ! -s "$task_file" ]] && { show_error "Chưa có lượt tải nào"; return; }
 
-    local list="" pid title file log
-    while IFS='|' read -r pid title file log; do
-        [[ -z "$pid" ]] && continue
-        local status
-        if kill -0 "$pid" 2>/dev/null; then
-            status="\033[1;33m[󰑈 Đang tải]\033[0m"
-        elif grep -qi "100%" "$log" 2>/dev/null || [[ -s "$DL/$file" ]]; then
-            status="\033[1;32m[󰄲 Hoàn tất]\033[0m"
+    local list="" f1 f2 f3 f4 row_title file log rc status now mtime
+    printf -v now '%(%s)T' -1
+    while IFS='|' read -r f1 f2 f3 f4; do
+        [[ -z "$f1" ]] && continue
+        # Legacy rows were pid|title|file|log; current rows are title|file|log
+        # with the exit status in <log>.rc.
+        if [[ -n "$f4" ]]; then
+            row_title="$f2"; file="$f3"; log="$f4"
         else
-            status="\033[0;90m[󰅚 Đã dừng]\033[0m"
+            row_title="$f1"; file="$f2"; log="$f3"
         fi
-        list="${status} ${title}|${log}"$'\n'"$list"
+        if [[ -f "$log.rc" ]]; then
+            rc=$(<"$log.rc")
+            if [[ "$rc" == "0" ]]; then
+                status="\033[1;32m[󰄲 Hoàn tất]\033[0m"
+            else
+                status="\033[1;31m[󰅚 Lỗi]\033[0m"
+            fi
+        else
+            mtime=$(stat -c %Y "$log" 2>/dev/null || stat -f %m "$log" 2>/dev/null || echo 0)
+            if (( now - mtime < 600 )); then
+                status="\033[1;33m[󰑈 Đang tải]\033[0m"
+            else
+                status="\033[0;90m[󰅚 Đã dừng]\033[0m"
+            fi
+        fi
+        list="${status} ${row_title}|${log}"$'\n'"$list"
     done < "$task_file"
 
     [[ -z "$list" ]] && { show_error "Chưa có lượt tải nào"; return; }
 
-    local chon
-    chon=$(echo -e "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+    echo -e "$list" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
         --delimiter='|' --with-nth=1 --prompt="Tải phim > " \
-        --header="Enter xem log · Esc quay lại" \
-        --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:55%:rounded:wrap)
-    [[ -z "$chon" ]] && return
+        --header="Di chuyển để xem log · Esc quay lại" \
+        --preview='tail -n 25 {2} 2>/dev/null || echo "Không có log"' --preview-window=down:55%:rounded:wrap >/dev/null
 }
 
 check_player() {
@@ -955,15 +1316,28 @@ play_video() {
     local url="$1" title="$2"
     shift 2
     local extra_args=("$@")
+    local is_vsmov=0
+    LAST_PLAYER_PID=""
 
-    # HLS streams: strip mid-roll ad segments via hls_fetch_clean (falls back
-    # to the original URL on any failure, so playback never breaks).
-    # Skipped when AD_BLOCK is disabled (0) in settings.
-    # Ad-stripping is phimapi-CDN specific (kkphimplayer*, phim1280*); ophim
-    # streams (e.g. vip.opstream90.com) have no mid-roll ads and must never
-    # pass through the pipeline — even when replayed from history/favorites.
-    if [[ "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]] && \
-       [[ "$url" == *kkphimplayer* || "$url" == *phim1280* || "$url" == *phimapi* ]]; then
+    if [[ "$url" == *"streamvsmov.com"* ]]; then
+        is_vsmov=1
+    fi
+    if [[ $is_vsmov -eq 1 ]]; then
+        url=$(resolve_stream_url "$url")
+        if [[ "$url" != *".m3u8"* ]]; then
+            log_debug "play_video: could not resolve VSMov stream"
+            show_error "Không lấy được link phát"
+            return 1
+        fi
+        if ! start_vsmov_proxy "$url"; then
+            show_error "Không khởi động được proxy VSMov"
+            return 1
+        fi
+        url="$VS_PROXY_URL"
+    fi
+
+    # PhimAPI HLS: strip ads. VSMov is already clean behind the local proxy.
+    if [[ $is_vsmov -eq 0 && "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]]; then
         url=$(hls_fetch_clean "$url")
     fi
 
@@ -1027,10 +1401,16 @@ parse_phimapi_v3() {
 }
 
 parse_v1_items() {
-    # Shared by phimapi and ophim1 — both return the same .data.items[] shape.
+    # v1 list endpoints: switch to the CDN base when the poster is relative.
     jq -r --arg cdn "$2" '.data.items[] |
         (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as $tag |
         "\(.name)|\(.year // "N/A")\($tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else ($cdn + "/" + (.poster_url // .thumb_url // "")) end)"' <<< "$1" 2>/dev/null
+}
+
+parse_vsmov_items() {
+    # VSMov list items only carry name/year/slug/poster.
+    jq -r '.items[] |
+        "\(.name)|\(.year // "N/A")|\(.country[0].name? // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(.poster_url // .thumb_url // "")"' <<< "$1" 2>/dev/null
 }
 
 
@@ -1039,16 +1419,13 @@ create_preview_script() {
     script=$(mktemp "$CACHE/preview.XXXXXX.sh") || return 1
     register_temp "$script"
 
-    local api_base
-    case "$API_SOURCE" in
-        phimapi) api_base="$API_PHIMAPI" ;;
-        *)       api_base="$API_OPHIM1" ;;
-    esac
+    local api_base="$API_BASE"
+    local source_key="$SOURCE"
 
     cat > "$script" << EOF
 #!/bin/bash
+$(declare -f hash_url)
 IFS='|' read -ra parts <<< "\$1"
-source="$API_SOURCE"
 
 if [[ \${#parts[@]} -ge 7 ]]; then
     ten="\${parts[1]}"
@@ -1075,7 +1452,7 @@ clean_content=""
 if [[ -n "\$slug" && "\$slug" != "null" ]]; then
     desc_cache="$CACHE/desc"
     mkdir -p "\$desc_cache"
-    detail_cache="\$desc_cache/\${slug}.json"
+    detail_cache="\$desc_cache/${source_key}-\${slug}.json"
 
     if [[ -f "\$detail_cache" ]]; then
         detail_res=\$(cat "\$detail_cache")
@@ -1113,14 +1490,6 @@ if [[ "\$img_url" =~ ^https?://[^/]+/(https?://.*) ]]; then
     img_url="\${BASH_REMATCH[1]}"
 fi
 
-if [[ "\$source" == "ophim1" && -n "\$slug" ]]; then
-    img_res=\$(curl -fsS --max-time 3 "${API_OPHIM1}/v1/api/phim/\${slug}/images" 2>/dev/null)
-    if [[ -n "\$img_res" ]]; then
-        tmdb_url=\$(echo "\$img_res" | jq -r '(.data.images[] | select(.type=="poster") | .file_path) // .data.images[0].file_path // ""' 2>/dev/null | head -1)
-        [[ -n "\$tmdb_url" && "\$tmdb_url" != "null" ]] && img_url="https://image.tmdb.org/t/p/w500\${tmdb_url}"
-    fi
-fi
-
 if [[ -z "\$img_url" || "\$img_url" == "null" ]]; then
     if [[ -n "\$detail_res" ]]; then
         detail_poster=\$(jq -r '.movie.poster_url // .movie.thumb_url // ""' <<< "\$detail_res" 2>/dev/null)
@@ -1142,7 +1511,7 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
         echo ""
         [[ "\$chafa_fmt" == "kitty" ]] && printf '\033_Ga=d,d=A\033\\'
 
-        cache_key="\${slug:-\$(printf '%s' "\$img_url" | md5sum | cut -d' ' -f1)}"
+        cache_key="${source_key}-\${slug:-\$(hash_url "\$img_url")}"
         img_cache="\$desc_cache/\${cache_key}.img"
         if [[ ! -s "\$img_cache" ]]; then
             curl -fsS --max-time 4 "\$img_url" -o "\$img_cache" 2>/dev/null
@@ -1243,7 +1612,7 @@ watch_episode() {
     [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
     server_idx=$(pick_server "$res" '.episodes') || return
-    ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | "\(.name)|\(.link_m3u8)"' <<< "$res" 2>/dev/null)
+    ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | select(((.link_m3u8 // "") != "") or ((.link_embed // "") != "")) | "\(.name)|\(if (.link_m3u8 // "") != "" then .link_m3u8 else (.link_embed // "") end)"' <<< "$res" 2>/dev/null)
 
     [[ -z "$ds_tap" ]] && { show_error "Không có tập phim"; return; }
 
@@ -1290,7 +1659,7 @@ watch_episode() {
 
         case "$phim" in
             enter)
-                record_history "$slug" "$tieu_de" "$url" || show_error "Không ghi được lịch sử"
+                record_history "$slug" "$tieu_de" "$url" "$tap" || show_error "Không ghi được lịch sử"
                 record_progress "$slug" "$tap" || show_error "Không ghi được tiến độ"
                 local tap_label="$tap"
                 [[ "$tap" =~ ^[0-9]+$ ]] && tap_label="Tập ${tap}"
@@ -1298,6 +1667,7 @@ watch_episode() {
 
                 play_video "$url" "$tieu_de"
                 [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
+                stop_vsmov_proxy
                 ;;
             tab)
                 download_episode "$url" "$tieu_de"
@@ -1396,6 +1766,12 @@ show_paginated_list() {
 
 fetch_list() {
     local loai="$1" p="$2" extra="$3" res cdn
+    if [[ "$SOURCE" == "vsmov" ]]; then
+        res=$(call_api "/danh-sach/${loai}?page=${p}")
+        [[ -z "$res" ]] && return
+        parse_vsmov_items "$res"
+        return
+    fi
     if [[ -n "$extra" ]]; then
         res=$(call_api "/v1/api/${loai}?${extra}&page=${p}&limit=30&sort_field=modified.time&sort_type=desc")
     else
@@ -1410,23 +1786,32 @@ create_search_script() {
     local script
     script=$(mktemp "$CACHE/search.XXXXXX.sh") || return 1
     register_temp "$script"
-    cat > "$script" << EOF
+    if [[ "$SOURCE" == "vsmov" ]]; then
+        cat > "$script" << EOF
 #!/bin/bash
 $(declare -f format_movie_items)
+$(declare -f parse_vsmov_items)
 
 [[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
 q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
-source="$API_SOURCE"
+res=\$(curl -fsS --max-time 5 "${API_BASE}/tim-kiem?keyword=\${q}" 2>/dev/null)
+[[ -z "\$res" ]] && exit 0
+parse_vsmov_items "\$res" | format_movie_items
+EOF
+    else
+        cat > "$script" << EOF
+#!/bin/bash
+$(declare -f format_movie_items)
+$(declare -f parse_v1_items)
 
-case "\$source" in
-    phimapi) base="${API_PHIMAPI}" ;;
-    *)       base="${API_OPHIM1}" ;;
-esac
-res=\$(curl -fsS --max-time 5 "\${base}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
+[[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
+q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
+res=\$(curl -fsS --max-time 5 "${API_BASE}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
 [[ -z "\$res" ]] && exit 0
 cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-echo "\$res" | jq -r --arg cdn "\$cdn" '.data.items[] | (if .quality then " [" + .quality + (if .lang then "-" + .lang else "" end) + "]" else "" end) as \$tag | "\(.name)|\(.year // "N/A")\(\$tag)|\(.country[0].name // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(if (.poster_url // "" | test("^https?://")) then .poster_url elif (.thumb_url // "" | test("^https?://")) then .thumb_url else (\$cdn + "/" + (.poster_url // .thumb_url // "")) end)"' 2>/dev/null | format_movie_items
+parse_v1_items "\$res" "\$cdn" | format_movie_items
 EOF
+    fi
     chmod +x "$script"
     echo "$script"
 }
@@ -1461,46 +1846,33 @@ search() {
 }
 
 new_releases() {
-    case "$API_SOURCE" in
-        phimapi)
-            show_loading
-            local res
-            res=$(call_api "/danh-sach/phim-moi-cap-nhat-v3?page=1")
-            [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
-            show_list "$(parse_phimapi_v3 "$res")" "PHIM MỚI"
-            ;;
-        *)
-            show_loading
-            local res cdn
-            res=$(call_api "/v1/api/danh-sach/phim-moi-cap-nhat?page=1")
-            [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
-            cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
-            show_list "$(parse_v1_items "$res" "$cdn")" "PHIM MỚI"
-            ;;
-    esac
+    show_loading
+    local res
+    if [[ "$SOURCE" == "vsmov" ]]; then
+        res=$(call_api "/danh-sach/phim-moi?page=1")
+        [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
+        show_list "$(parse_vsmov_items "$res")" "PHIM MỚI"
+        return
+    fi
+    res=$(call_api "/danh-sach/phim-moi-cap-nhat-v3?page=1")
+    [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
+    show_list "$(parse_phimapi_v3 "$res")" "PHIM MỚI"
 }
 
 browse() {
     local menu
-
-    case "$API_SOURCE" in
-        phimapi)
-            menu="󰎁  Phim Bộ|phim-bo
+    if [[ "$SOURCE" == "vsmov" ]]; then
+        menu="󰎁  Phim Mới|phim-moi
+󰎁  Phim Bộ|phim-bo
 󰎁  Phim Lẻ|phim-le
-󰎁  TV Shows|tv-shows
 󰎁  Hoạt Hình|hoat-hinh"
-            ;;
-        *)
-            menu="󰎁  Phim Mới|phim-moi
+    else
+        menu="󰎁  Phim Mới|phim-moi
 󰎁  Phim Bộ|phim-bo
 󰎁  Phim Lẻ|phim-le
 󰎁  TV Shows|tv-shows
-󰎁  Hoạt Hình|hoat-hinh
-󰎁  Phim Chiếu Rạp|phim-chieu-rap
-󰎁  Phim Vietsub|phim-vietsub
-󰎁  Phim Thuyết Minh|phim-thuyet-minh"
-            ;;
-    esac
+󰎁  Hoạt Hình|hoat-hinh"
+    fi
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --delimiter='|' --with-nth=1 --prompt="Duyệt > " --height=50%)
@@ -1510,9 +1882,22 @@ browse() {
     local ten_raw="${chon%%|*}"
     local ten="${ten_raw#*. }"
 
-    fetch_browse() {
-        fetch_list "danh-sach/${loai}" "$1"
-    }
+    if [[ "$SOURCE" == "vsmov" ]]; then
+        fetch_browse() {
+            local res
+            if [[ "$loai" == "hoat-hinh" ]]; then
+                res=$(call_api "/the-loai/hoat-hinh?page=$1")
+            else
+                res=$(call_api "/danh-sach/${loai}?page=$1")
+            fi
+            [[ -z "$res" ]] && return
+            parse_vsmov_items "$res"
+        }
+    else
+        fetch_browse() {
+            fetch_list "danh-sach/${loai}" "$1"
+        }
+    fi
 
     show_paginated_list "$ten" fetch_browse
 }
@@ -1536,7 +1921,15 @@ filter_by_category() {
     local ten="${ten_raw#*. }"
 
     fetch_category() {
-        fetch_list "danh-sach/phim-moi" "$1" "${param}=${slug}"
+        if [[ "$SOURCE" == "vsmov" ]]; then
+            local res kind="the-loai"
+            [[ "$param" == "country" ]] && kind="quoc-gia"
+            res=$(call_api "/${kind}/${slug}?page=$1")
+            [[ -z "$res" ]] && return
+            parse_vsmov_items "$res"
+        else
+            fetch_list "danh-sach/phim-moi" "$1" "${param}=${slug}"
+        fi
     }
 
     show_paginated_list "$ten" fetch_category
@@ -1558,7 +1951,14 @@ filter_by_year() {
 
 
     fetch_year() {
-        fetch_list "nam/${nam_chon}" "$1"
+        if [[ "$SOURCE" == "vsmov" ]]; then
+            local res
+            res=$(call_api "/nam/${nam_chon}?page=$1")
+            [[ -z "$res" ]] && return
+            parse_vsmov_items "$res"
+        else
+            fetch_list "nam/${nam_chon}" "$1"
+        fi
     }
 
     show_paginated_list "Năm $nam_chon" fetch_year
@@ -1569,6 +1969,12 @@ anime_mode() {
     fetch_anime() {
         local p="$1"
         local res cdn
+        if [[ "$SOURCE" == "vsmov" ]]; then
+            res=$(call_api "/the-loai/hoat-hinh?page=${p}")
+            [[ -z "$res" ]] && return
+            parse_vsmov_items "$res"
+            return
+        fi
         res=$(call_api "/v1/api/danh-sach/hoat-hinh?page=${p}&country=nhat-ban&sort_field=modified.time&sort_type=desc")
         [[ -z "$res" ]] && return
         cdn=$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "$res")
@@ -1600,7 +2006,7 @@ history() {
     local formatted
     formatted=$(sort -rn "$HIST" | awk -F'|' '{
         display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m󰎤 %s\033[0m", NR, $2)
-        printf "%s|%s|%s|%s|%s\n", display, $1, $2, $3, $4
+        printf "%s|%s|%s|%s|%s|%s\n", display, $1, $2, $3, $4, $5
     }')
 
     local chon
@@ -1609,10 +2015,14 @@ history() {
         --header="Enter xem lại · Esc quay lại " \
         --prompt="Lịch sử > " <<< "$formatted")
     [[ -z "$chon" ]] && return
-    local title url
-    IFS='|' read -r _ _ title _ url <<< "$chon"
+    local title slug url ep fresh
+    IFS='|' read -r _ _ title slug url ep <<< "$chon"
     [[ -z "$url" ]] && return
+    fresh=$(resolve_saved_url "$slug" "$ep" "$url")
+    [[ -n "$fresh" ]] && url="$fresh"
     play_video "$url" "$title"
+    [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
+    stop_vsmov_proxy
 }
 
 
@@ -1647,44 +2057,6 @@ favorites() {
             remove_favorite "$slug" || show_error "Không xóa được yêu thích"
             ;;
     esac
-}
-
-check_source_status() {
-    local url="$1"
-    curl -fsS --max-time 2 --head "$url" &>/dev/null && echo "✓" || echo "✗"
-}
-
-select_source() {
-    local phimapi_mark="" ophim1_mark=""
-
-    case "$API_SOURCE" in
-        phimapi)   phimapi_mark=" (đang dùng)" ;;
-        *)         ophim1_mark=" (đang dùng)" ;;
-    esac
-
-    echo -e "${C_C} Kiểm tra kết nối nguồn...${C_R}"
-    local st_ophim st_phimapi
-    st_ophim=$(check_source_status "$API_OPHIM1")
-    st_phimapi=$(check_source_status "$API_PHIMAPI")
-
-    local menu="󱃾  Ophim ${st_ophim}${ophim1_mark}|ophim1
-󱃾  PhimAPI ${st_phimapi}${phimapi_mark}|phimapi"
-
-    local chon
-    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="Nguồn > " --height=40% \
-        --header="Nguồn phim · Esc quay lại ")
-    [[ -z "$chon" ]] && return
-
-    local new_source="${chon#*|}"
-
-    if [[ "$new_source" != "$API_SOURCE" ]]; then
-        purge_api_cache
-        log_debug "Cache cleared: source switched from $API_SOURCE to $new_source"
-    fi
-
-    API_SOURCE="$new_source"
-    save_settings
 }
 
 select_player() {
@@ -1740,13 +2112,14 @@ select_quality() {
 }
 
 purge_api_cache() {
-    rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8
+    rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8 "$CACHE"/*-dl.m3u8
+    rm -f "$CACHE"/vsmov-proxy.py "$CACHE"/vsmov-proxy.log "$CACHE"/vsmov-proxy.*.port
     rm -rf "$CACHE/desc" "$CACHE/segments"
 }
 
 clear_cache() {
     local count=0 f
-    for f in "$CACHE"/*.json "$CACHE"/*-clean.m3u8; do
+    for f in "$CACHE"/*.json "$CACHE"/*-clean.m3u8 "$CACHE"/*-dl.m3u8; do
         [[ -f "$f" ]] && ((count++))
     done
     if [[ -d "$CACHE/desc" ]]; then
@@ -1770,12 +2143,40 @@ toggle_ad_block() {
     sleep 1
 }
 
-settings() {
-    local ad_status
-    [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
+select_source() {
+    local phimapi_mark="" vsmov_mark=""
+    [[ "$SOURCE" == "phimapi" ]] && phimapi_mark=" \033[1;32m(đang dùng)\033[0m"
+    [[ "$SOURCE" == "vsmov" ]] && vsmov_mark=" \033[1;32m(đang dùng)\033[0m"
 
-    local menu="${I_PLAYER} Trình phát|player
-${I_SOURCE} Nguồn phim|nguon
+    local menu="PhimAPI${phimapi_mark}|phimapi
+VSMov${vsmov_mark}|vsmov"
+
+    local chon
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
+        --delimiter='|' --with-nth=1 --prompt="Nguồn phim > " --height=40% \
+        --header="Nguồn phim · Esc quay lại ")
+    [[ -z "$chon" ]] && return
+
+    local selected="${chon#*|}"
+    if [[ "$selected" == "vsmov" ]] && ! command -v python3 >/dev/null 2>&1; then
+        show_error "VSMov cần python3"
+        return
+    fi
+    SOURCE="$selected"
+    set_api_base
+    save_settings
+}
+
+settings() {
+    local ad_status source_status
+    [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
+    case "$SOURCE" in
+        vsmov) source_status="VSMov" ;;
+        *)     source_status="PhimAPI" ;;
+    esac
+
+    local menu="${I_SOURCE} Nguồn phim: ${source_status}|source
+${I_PLAYER} Trình phát|player
 ${I_QUA} Chất lượng|quality
 󰫈  Chặn quảng cáo: ${ad_status}|adblock
 󰇚  Tải phim|downloads
@@ -1789,8 +2190,8 @@ ${I_CACHE} Xóa cache|cache"
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
+        source)    select_source ;;
         player)    select_player ;;
-        nguon)     select_source ;;
         quality)   select_quality ;;
         adblock)   toggle_ad_block ;;
         downloads) view_downloads ;;
@@ -1802,9 +2203,9 @@ ${I_CACHE} Xóa cache|cache"
 show_banner() {
     printf '\033[H\033[2J'
     local nguon_text player_text quality_text
-    case "$API_SOURCE" in
-        phimapi)   nguon_text="PhimAPI" ;;
-        *)         nguon_text="Ophim" ;;
+    case "$SOURCE" in
+        vsmov) nguon_text="VSMov" ;;
+        *)     nguon_text="PhimAPI" ;;
     esac
     case "$PLAYER_DEFAULT" in
         vlc) player_text="VLC" ;;
@@ -1853,23 +2254,27 @@ main_menu() {
         --header="Chọn mục · mũi tên hoặc phím số "
 }
 
+show_help() {
+    echo -e "${C_G}Sudachi — Trình xem phim & anime tiếng Việt trên Terminal${C_R}"
+    echo ""
+    echo "Cách dùng: sudachi [tùy chọn]"
+    echo ""
+    echo "Tùy chọn:"
+    echo "  -s, --search [TỪ_KHÓA]    Tìm kiếm phim trực tiếp"
+    echo "  -c, --continue            Xem tiếp tập phim đang xem dở gần nhất"
+    echo "  -l, --latest              Mở danh sách Phim Mới"
+    echo "  -a, --anime               Mở danh mục Anime"
+    echo "  -d, --downloads           Xem tiến độ và danh sách tải phim"
+    echo "  -h, --help                Hiển thị trợ giúp này"
+    echo ""
+}
+
 handle_cli_args() {
     [[ $# -eq 0 ]] && return 0
 
     case "$1" in
         -h|--help)
-            echo -e "${C_G}Sudachi — Trình xem phim & anime tiếng Việt trên Terminal${C_R}"
-            echo ""
-            echo "Cách dùng: sudachi [tùy chọn]"
-            echo ""
-            echo "Tùy chọn:"
-            echo "  -s, --search [TỪ_KHÓA]    Tìm kiếm phim trực tiếp"
-            echo "  -c, --continue            Xem tiếp tập phim đang xem dở gần nhất"
-            echo "  -l, --latest              Mở danh sách Phim Mới"
-            echo "  -a, --anime               Mở danh mục Anime"
-            echo "  -d, --downloads           Xem tiến độ và danh sách tải phim"
-            echo "  -h, --help                Hiển thị trợ giúp này"
-            echo ""
+            show_help
             exit 0
             ;;
         -s|--search)
@@ -1881,11 +2286,16 @@ handle_cli_args() {
             if [[ -s "$HIST" ]]; then
                 local last_line
                 last_line=$(sort -rn "$HIST" | head -1)
-                local title url
-                IFS='|' read -r _ title _ url <<< "$last_line"
+                local title slug url ep fresh
+                IFS='|' read -r _ title slug url ep <<< "$last_line"
+                fresh=$(resolve_saved_url "$slug" "$ep" "$url")
+                [[ -n "$fresh" ]] && url="$fresh"
                 if [[ -n "$url" ]]; then
                     echo -e "${C_G}▶ Tiếp tục xem: $title${C_R}"
+                    check_player
                     play_video "$url" "$title"
+                    [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
+                    stop_vsmov_proxy
                     exit 0
                 fi
             fi
@@ -1914,9 +2324,14 @@ handle_cli_args() {
 
 
 load_settings
+set_api_base
+# Help must work on a machine without fzf/curl/player.
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+esac
 check_dependencies
-check_player
 handle_cli_args "$@"
+check_player
 
 while true; do
     show_banner

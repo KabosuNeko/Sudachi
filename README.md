@@ -14,9 +14,9 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 
 ## Điểm chính
 
-- **Hai nguồn phim**: PhimAPI và OPhim, đổi qua lại trong Cài đặt
+- **Nguồn phim**: VSMov (mặc định) và PhimAPI — đổi trong Cài đặt → Nguồn phim
 - **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
-- **Tải tập**: `yt-dlp` + `aria2c` đa luồng, thông báo desktop khi xong
+- **Tải tập**: `yt-dlp` đa luồng (aria2c hoặc HLS native), thông báo desktop khi xong
 - **Poster trong terminal**: preview bằng `chafa` (Kitty/Sixel)
 - **Lịch sử, yêu thích, xem tiếp**: mở lại đúng tập và đúng chỗ đang xem dở
 - **CLI flags**: tìm nhanh, xem tiếp, phim mới, anime, tiến độ tải
@@ -33,17 +33,18 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 | `yt-dlp` + `aria2c` | Tải tập đa luồng |
 | `notify-send` | Thông báo khi tải xong |
 | `ffmpeg` + `ffprobe` | Ghép mốc thời gian clip tài trợ để tua mượt (thiếu vẫn phát bình thường) |
+| `python3` | Proxy bóc header PNG cho luồng VSMov (chỉ cần khi dùng VSMov) |
 
 ### Cài theo distro
 
 **Arch**
 ```bash
-sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg
+sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg python
 ```
 
 **Debian/Ubuntu**
 ```bash
-sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa ffmpeg
+sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa ffmpeg python3
 # yt-dlp từ apt thường bản cũ — cài binary thủ công:
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
@@ -51,7 +52,7 @@ sudo chmod a+rx /usr/local/bin/yt-dlp
 
 **Fedora**
 ```bash
-sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg
+sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg python3
 ```
 
 ## Cài đặt
@@ -93,28 +94,30 @@ Tự tạo tại `~/.config/sudachi/`:
 
 | File | Nội dung |
 |---|---|
-| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo |
-| `source.conf` | Nguồn phim đang dùng |
+| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=phimapi\|vsmov`) |
 | `history.log` · `favorites.log` · `progress.log` | Lịch sử xem, yêu thích, tập đang xem dở |
 | `cache/` | Cache API, poster, playlist đã lọc và clip đã ghép (`Cài đặt → Xóa cache` để dọn) |
 
 ## Nguồn phim
 
-| Nguồn | API |
-|---|---|
-| [PhimAPI](https://phimapi.com) | `https://phimapi.com` |
-| [OPhim](https://ophim.cc) | `https://ophim1.com` |
+Đổi trong **Cài đặt → Nguồn phim**:
+
+- **VSMov** (mặc định): `vsmov.com/api`, 1080p, không có ad giữa tập hay watermark `99z2`. Segment TS bị bọc trong header PNG; Sudachi chạy proxy Python cục bộ để bóc header (cần `python3`).
+- **PhimAPI**: `phimapi.com`, nguồn cũ. Phần phát đã cắt khối ad `/v8/`; clip `convertv` vẫn còn chữ tài trợ vì là cảnh phim thật.
+
+OPhim đã chết, NguonC bị Turnstile ở player. Cả hai nguồn đều là bên thứ ba và có thể chết bất cứ lúc nào.
 
 ## Chặn quảng cáo HLS
 
-Với phim từ phimapi, khối quảng cáo chèn giữa tập được lọc trước khi phát — tua tới/lui không còn nhảy về đầu.
+Với nguồn PhimAPI, mọi playlist `.m3u8` được lọc trước khi phát — tua tới/lui không còn nhảy về đầu. VSMov không chèn quảng cáo nên không cần bước này; proxy chỉ bóc header PNG.
 
 - Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`. Khối segment ngoài thư mục phim ngay sau `#EXT-X-KEY:METHOD=NONE` cũng bị coi là quảng cáo, kể cả khi CDN đổi tên đường dẫn; segment trong đúng thư mục phim không bao giờ bị cắt
 - **Chất lượng** (Cài đặt → Chất lượng) chọn đúng variant HLS: mặc định bản cao nhất, chọn 720p sẽ lấy variant ≤ 720p
 - Clip `convertv*` là cảnh phim thật kèm text tài trợ nhưng bị CDN đặt lại mốc thời gian; `ffmpeg` ghép chúng về đúng dòng thời gian phim nên tua qua đoạn này đứng yên. Các clip liền nhau thành từng cụm, mỗi cụm neo vào segment phim ngay trước nó — playlist nhiều cụm vẫn ghép đúng. Thiếu `ffmpeg`/`ffprobe` thì giữ nguyên dấu `DISCONTINUITY` — vẫn phát bình thường
 - Phát bằng VLC: thêm `--no-input-fast-seek` (tua chính xác) và `--network-caching=3000` (đệm segment từ xa); tùy chọn chất lượng giữ nguyên
-- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache; CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
-- Tải phim (Tab) giữ nguyên stream gốc (có ad) — chỉ lọc khi phát
+- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache (tối đa 6 giờ); CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
+- Tải phim (Tab) với PhimAPI dùng playlist đã cắt ad (`cache/<hash>-dl.m3u8`), nên file tải về không còn khối quảng cáo giữa tập; clip `convertv` vẫn giữ nguyên vì là nội dung phim
+- Với VSMov, tải phim chạy qua cùng proxy với lúc phát nên file tải về là stream sạch
 
 ## Credits
 

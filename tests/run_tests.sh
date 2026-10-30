@@ -111,15 +111,6 @@ test_format_movie_items() {
     assert_eq "https://img.url/p.jpg" "$field7" "field 7 is poster" || return 1
 }
 
-test_get_base_url() {
-    API_SOURCE=phimapi
-    assert_eq "$API_PHIMAPI" "$(get_base_url)" "phimapi" || return 1
-    API_SOURCE=ophim1
-    assert_eq "$API_OPHIM1" "$(get_base_url)" "ophim1" || return 1
-    API_SOURCE=bogus
-    assert_eq "$API_OPHIM1" "$(get_base_url)" "fallback to ophim1" || return 1
-}
-
 test_parse_v1_items() {
     local json='{"data":{"items":[
         {"name":"Phim A","year":2024,"quality":"FHD","lang":"Vietsub","country":[{"name":"VN"}],"episode_current":"12/24","slug":"phim-a","poster_url":"/p/a.jpg"},
@@ -140,6 +131,63 @@ test_parse_phimapi_v3() {
     local out
     out=$(parse_phimapi_v3 "$json")
     assert_eq $'Phim A|2023 [HD-TM]|US|10|phim-a|/p/a.jpg' "$out" "item mapping" || return 1
+}
+
+test_parse_vsmov_items() {
+    local json='{"items":[
+        {"name":"Phim A","year":2026,"slug":"phim-a","poster_url":"https://img/a.jpg"},
+        {"name":"Phim B","slug":"phim-b","thumb_url":"https://img/b.jpg"}
+    ]}'
+    local out
+    out=$(parse_vsmov_items "$json")
+    assert_eq $'Phim A|2026|N/A|N/A|phim-a|https://img/a.jpg\nPhim B|N/A|N/A|N/A|phim-b|https://img/b.jpg' \
+        "$out" "vsmov item mapping" || return 1
+}
+
+test_parse_vsmov_player_page() {
+    local page='const playerOptions = {
+        enableSignedUrl: false,
+        signedMasterUrl: "",
+    };
+    const baseUrl = "https://v9.streamvsmov.com";
+    const videoHash = "abc123";'
+    assert_eq "https://v9.streamvsmov.com/stream/abc123/master.m3u8" \
+        "$(parse_vsmov_player_page <<< "$page")" "baseUrl + videoHash" || return 1
+
+    local signed='enableSignedUrl: true,
+        signedMasterUrl: "https://cdn.example/signed.m3u8",'
+    assert_eq "https://cdn.example/signed.m3u8" \
+        "$(parse_vsmov_player_page <<< "$signed")" "signed master wins" || return 1
+    assert_eq "" "$(parse_vsmov_player_page <<< 'no vars here')" "unparseable page" || return 1
+}
+
+test_resolve_stream_url() {
+    local bin="$TEST_HOME/vsmov-resolve"
+    mkdir -p "$bin"
+    cat > "$bin/curl" <<'EOF'
+#!/bin/bash
+cat <<'PAGE'
+const baseUrl = "https://v9.streamvsmov.com";
+const videoHash = "abc123";
+PAGE
+EOF
+    chmod +x "$bin/curl"
+
+    assert_eq "https://v9.streamvsmov.com/stream/abc123/master.m3u8" \
+        "$(PATH="$bin:$PATH" resolve_stream_url "https://v9.streamvsmov.com/video/abc123")" \
+        "vsmov player page resolved" || return 1
+    assert_eq "https://cdn.example/x.m3u8" \
+        "$(resolve_stream_url "https://cdn.example/x.m3u8")" "direct playlist passthrough" || return 1
+    assert_eq "https://other.example/x" \
+        "$(resolve_stream_url "https://other.example/x")" "other sources passthrough" || return 1
+}
+
+test_vsmov_proxy_selftest() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    create_vsmov_proxy_script || return 1
+    local out
+    out=$(python3 "$CACHE/vsmov-proxy.py" --selftest 2>&1) || { echo "$out" >&2; return 1; }
+    assert_eq "ok" "$out" "PNG header stripped to TS" || return 1
 }
 
 test_hash_url() {
@@ -277,6 +325,18 @@ test_hls_pick_variant() {
     assert_eq "" "$(hls_pick_variant "#EXTM3U" "")" "no variants echoes nothing" || return 1
 }
 
+test_hls_pick_variant_no_resolution() {
+    # Masters without RESOLUTION must still yield a variant; otherwise the
+    # caller falls back to the raw ad-carrying master playlist.
+    local master='#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000
+a/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000
+b/index.m3u8'
+    assert_eq "b/index.m3u8" "$(hls_pick_variant "$master" "")" "auto picks highest bandwidth" || return 1
+    assert_eq "a/index.m3u8" "$(hls_pick_variant "$master" "720")" "numeric quality falls back to first variant" || return 1
+}
+
 test_hls_strip_uri_attrs() {
     local base="https://cdn/x/a/index.m3u8"
     local out
@@ -305,6 +365,54 @@ EOF
 
     out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
     assert_eq "$clean" "$out" "refetch failure reuses cached clean playlist" || return 1
+}
+
+test_hls_fetch_clean_download_mode() {
+    # Download mode must cache as -dl.m3u8 and skip convertv rebasing.
+    local curlbin="$TEST_HOME/curlbin-hls-dl"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
+EOF
+    chmod +x "$curlbin/curl"
+
+    local url="https://cdn.example/hls/media.m3u8"
+    local out hash clean
+    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url" dl)
+    hash=$(hash_url "$url")
+    clean="$CACHE/$hash-dl.m3u8"
+    assert_eq "$clean" "$out" "download cache path" || return 1
+    [[ -f "$clean" ]] || { echo "download playlist missing" >&2; return 1; }
+    assert_eq 0 "$(grep -c '/v8/' "$clean")" "download drops /v8/ ads" || return 1
+    assert_contains "$(cat "$clean")" "convertv8" "download keeps convertv URIs (no rebase)" || return 1
+    [[ ! -e "$CACHE/$hash-clean.m3u8" ]] || { echo "play cache must not be written" >&2; return 1; }
+}
+
+test_hls_fetch_clean_rejects_non_playlist() {
+    # CDNs answer with HTML/JSON while the origin is down. That body must not
+    # be cached as a cleaned playlist; fall back to the cached clean one, then
+    # to the original URL.
+    local curlbin="$TEST_HOME/curlbin-hls-html"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<'EOF'
+#!/bin/bash
+echo '<html><body>503 Service Unavailable</body></html>'
+EOF
+    chmod +x "$curlbin/curl"
+
+    local url="https://cdn.example/ep1/master.m3u8"
+    local hash clean out
+    hash=$(hash_url "$url")
+    clean="$CACHE/$hash-clean.m3u8"
+
+    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
+    assert_eq "$url" "$out" "invalid body falls back to original url" || return 1
+    [[ ! -e "$clean" ]] || { echo "HTML must not be cached as a playlist" >&2; return 1; }
+
+    printf '#EXTM3U\n#EXTINF:10,\nhttps://cdn.example/ep1/seg.ts\n' > "$clean"
+    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
+    assert_eq "$clean" "$out" "existing clean playlist preferred over raw url" || return 1
 }
 
 test_hls_fetch_clean_quality() {
@@ -359,18 +467,37 @@ test_is_cache_fresh() {
 }
 
 test_record_history() {
-    record_history "slug-1" $'Title | weird\nname' "http://url/1" || return 1
+    record_history "slug-1" $'Title | weird\nname' "http://url/1" "5" || return 1
     local line
     line=$(cat "$HIST")
-    assert_contains "$line" "|Title - weird name|slug-1|http://url/1" "record shape" || return 1
+    assert_contains "$line" "|Title - weird name|slug-1|http://url/1|5" "record shape" || return 1
+    assert_eq 5 "$(awk -F'|' '{print NF}' <<< "$line")" "five fields" || return 1
     assert_eq 1 "$(wc -l < "$HIST")" "single record" || return 1
     # Re-recording the same slug replaces the old entry.
-    record_history "slug-1" "New Title" "http://url/2" || return 1
+    record_history "slug-1" "New Title" "http://url/2" "6" || return 1
     assert_eq 1 "$(wc -l < "$HIST")" "dedupe by slug" || return 1
     assert_contains "$(cat "$HIST")" "New Title" "replaced title" || return 1
     # Different slug appends.
-    record_history "slug-2" "Other" "http://url/3" || return 1
+    record_history "slug-2" "Other" "http://url/3" "1" || return 1
     assert_eq 2 "$(wc -l < "$HIST")" "append new slug" || return 1
+}
+
+test_resolve_saved_url() {
+    call_api() {
+        cat <<'JSON'
+{"episodes":[{"server_data":[
+  {"name":"1","link_m3u8":"https://cdn/ep1.m3u8"},
+  {"name":"2","link_embed":"https://v9.streamvsmov.com/video/ep2"},
+  {"name":"3","link_m3u8":""}
+]}]}
+JSON
+    }
+    assert_eq "https://cdn/ep1.m3u8" "$(resolve_saved_url "slug" "1")" "phimapi link" || return 1
+    assert_eq "https://v9.streamvsmov.com/video/ep2" "$(resolve_saved_url "slug" "2")" "vsmov embed" || return 1
+    assert_eq "" "$(resolve_saved_url "slug" "missing")" "unknown episode" || return 1
+    assert_eq "" "$(resolve_saved_url "" "1")" "missing slug" || return 1
+    SOURCE=vsmov
+    assert_eq "" "$(resolve_saved_url "slug" "1" "https://cdn.example/movie.m3u8")" "phimapi URL not resolved on vsmov" || return 1
 }
 
 test_record_progress() {
@@ -405,10 +532,10 @@ test_remove_favorite() {
 
 test_load_settings() {
     # Defaults when nothing exists.
-    assert_eq "phimapi" "$API_SOURCE" "default source" || return 1
     assert_eq "mpv" "$PLAYER_DEFAULT" "default player" || return 1
     assert_eq "" "$QUALITY" "default quality" || return 1
     assert_eq 1 "$AD_BLOCK" "default ad_block" || return 1
+    assert_eq "vsmov" "$SOURCE" "default source" || return 1
 
     # With config present: quoted values, whitespace, comments, invalid lines.
     printf 'PLAYER_DEFAULT = "vlc"\n' > "$CONFIG_FILE"
@@ -416,11 +543,11 @@ test_load_settings() {
     printf '# comment\n' >> "$CONFIG_FILE"
     printf 'BOGUS_KEY=1\n' >> "$CONFIG_FILE"
     printf 'QUALITY=999\n' >> "$CONFIG_FILE"
-    printf 'ophim1\n' > "$SOURCE_FILE"
+    printf 'SOURCE=phimapi\n' >> "$CONFIG_FILE"
     load_settings
-    assert_eq "ophim1" "$API_SOURCE" "source from file" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "quoted player" || return 1
     assert_eq "720" "$QUALITY" "quality" || return 1
+    assert_eq "phimapi" "$SOURCE" "source" || return 1
 
     # Invalid QUALITY ignored: with fresh state (QUALITY=""), an invalid value
     # must not set QUALITY.
@@ -431,28 +558,31 @@ test_load_settings() {
 }
 
 test_save_settings() {
-    API_SOURCE=ophim1
     PLAYER_DEFAULT=vlc
     QUALITY=480
     AD_BLOCK=0
+    SOURCE=vsmov
     save_settings
     assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
     assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
     assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
-    assert_eq "ophim1" "$(cat "$SOURCE_FILE")" "source file" || return 1
+    assert_eq "SOURCE=vsmov" "$(sed -n 4p "$CONFIG_FILE")" "config source" || return 1
     # Round-trip through load_settings.
-    API_SOURCE=phimapi PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1
+    PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1 SOURCE=phimapi
     load_settings
-    assert_eq "ophim1" "$API_SOURCE" "roundtrip source" || return 1
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
     assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
+    assert_eq "vsmov" "$SOURCE" "roundtrip source" || return 1
 }
 
 test_clear_cache_removes_all() {
     mkdir -p "$CACHE/desc" "$CACHE/downloads" "$CACHE/segments"
     : > "$CACHE/api.json"
     : > "$CACHE/foo-clean.m3u8"
+    : > "$CACHE/foo-dl.m3u8"
+    : > "$CACHE/vsmov-proxy.py"
+    : > "$CACHE/vsmov-proxy.log"
     : > "$CACHE/desc/poster.img"
     : > "$CACHE/downloads/tasks.log"
     : > "$CACHE/segments/abc-r.ts"
@@ -461,6 +591,9 @@ test_clear_cache_removes_all() {
 
     [[ ! -f "$CACHE/api.json" ]] || { echo "json cache left" >&2; return 1; }
     [[ ! -f "$CACHE/foo-clean.m3u8" ]] || { echo "clean playlist left" >&2; return 1; }
+    [[ ! -f "$CACHE/foo-dl.m3u8" ]] || { echo "download playlist left" >&2; return 1; }
+    [[ ! -f "$CACHE/vsmov-proxy.py" ]] || { echo "proxy script left" >&2; return 1; }
+    [[ ! -f "$CACHE/vsmov-proxy.log" ]] || { echo "proxy log left" >&2; return 1; }
     [[ ! -e "$CACHE/desc" ]] || { echo "desc dir left" >&2; return 1; }
     [[ ! -e "$CACHE/segments" ]] || { echo "segments dir left" >&2; return 1; }
     [[ -f "$CACHE/downloads/tasks.log" ]] || { echo "downloads must survive" >&2; return 1; }
@@ -476,12 +609,100 @@ printf '%s\n' "\$@" > "$dl_args"
 EOF
     chmod +x "$bin/yt-dlp"
     sleep() { :; }
+    AD_BLOCK=0
     PATH="$bin:$PATH" download_episode "https://example.com/ep.m3u8" "Frieren: Pháp Sư Tiễn Táng (Phần 2) - Tập 01" >/dev/null
     wait
     local recorded
     recorded=$(cat "$dl_args" 2>/dev/null)
     assert_contains "$recorded" "Frieren_-_Pháp_Sư_Tiễn_Táng_(Phần_2)_-_Tập_01.mp4" "preserves Vietnamese name" || return 1
+    local row log
+    row=$(cat "$CACHE/downloads/tasks.log")
+    assert_eq 3 "$(awk -F'|' '{print NF}' <<< "$row")" "task row has title|file|log" || return 1
+    log=$(cut -d'|' -f3 <<< "$row")
+    [[ -f "$log.rc" ]] || { echo "missing exit status file: $log.rc" >&2; return 1; }
+    assert_eq 0 "$(cat "$log.rc")" "successful download records rc=0" || return 1
     unset -f sleep
+}
+
+test_download_episode_ad_free() {
+    local bin="$TEST_HOME/dlbin-adfree"
+    mkdir -p "$bin"
+    local argsfile="$TEST_HOME/yt-dlp-adfree-args"
+    : > "$argsfile"
+    cat > "$bin/yt-dlp" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$argsfile"
+EOF
+    chmod +x "$bin/yt-dlp"
+
+    local curlbin="$TEST_HOME/dlbin-adfree-curl"
+    mkdir -p "$curlbin"
+    cat > "$curlbin/curl" <<EOF
+#!/bin/bash
+cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
+EOF
+    chmod +x "$curlbin/curl"
+
+    sleep() { :; }
+    AD_BLOCK=1
+    PATH="$bin:$curlbin:$PATH" download_episode "https://cdn.example/hls/master.m3u8" "Ad Test" >/dev/null
+    wait
+    local recorded
+    recorded=$(cat "$argsfile")
+    assert_contains "$recorded" "--enable-file-urls" "local cleaned playlist enabled" || return 1
+    assert_contains "$recorded" "-dl.m3u8" "downloads from stripped playlist" || return 1
+    assert_contains "$recorded" "file://" "local playlist URL" || return 1
+    unset -f sleep
+}
+
+test_download_episode_vsmov() {
+    local bin="$TEST_HOME/dlbin-vsmov"
+    mkdir -p "$bin"
+    local argsfile="$TEST_HOME/yt-dlp-vsmov-args"
+    : > "$argsfile"
+    cat > "$bin/yt-dlp" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$argsfile"
+EOF
+    chmod +x "$bin/yt-dlp"
+
+    resolve_stream_url() { printf '%s' "https://v9.streamvsmov.com/stream/x/master.m3u8"; }
+    start_vsmov_proxy() {
+        # shellcheck disable=SC2034  # read by download_episode
+        VS_PROXY_URL="http://127.0.0.1:1/master.m3u8"
+        return 0
+    }
+    stop_vsmov_proxy() { :; }
+    sleep() { :; }
+
+    AD_BLOCK=1
+    PATH="$bin:$PATH" download_episode "https://v9.streamvsmov.com/video/x" "VSMov Test" >/dev/null
+    wait
+    local recorded
+    recorded=$(cat "$argsfile")
+    assert_contains "$recorded" "http://127.0.0.1:1/master.m3u8" "yt-dlp receives the proxy URL" || return 1
+    assert_contains "$recorded" "-N" "native HLS concurrency" || return 1
+    unset -f sleep resolve_stream_url start_vsmov_proxy stop_vsmov_proxy
+}
+
+test_view_downloads_status() {
+    mkdir -p "$CACHE/downloads"
+    local log="$CACHE/downloads/1_new.log"
+    local legacy="$CACHE/downloads/2_old.log"
+    : > "$log"
+    : > "$legacy"
+    printf '%s|%s|%s\n' "Phim Mới" "new.mp4" "$log" > "$CACHE/downloads/tasks.log"
+    printf '%s|%s|%s|%s\n' "99999999" "Phim Cũ" "old.mp4" "$legacy" >> "$CACHE/downloads/tasks.log"
+    printf '0\n' > "$log.rc"
+
+    fzf() { cat > "$TEST_HOME/fzf-in"; }
+    view_downloads
+    local seen
+    seen=$(cat "$TEST_HOME/fzf-in")
+    assert_contains "$seen" "Hoàn tất" "rc=0 marks the download complete" || return 1
+    assert_contains "$seen" "Phim Mới" "current row title parsed" || return 1
+    assert_contains "$seen" "Phim Cũ" "legacy row title parsed" || return 1
+    unset -f fzf
 }
 
 test_handle_cli_args() {
@@ -1123,8 +1344,10 @@ test_call_api_stale_cache_refetch() {
     local counter="$TEST_HOME/curl-count-stale"
     : > "$counter"
     make_fake_curl "$counter" ok
+    SOURCE=phimapi
+    set_api_base
     local key
-    key=$(hash_url "${API_PHIMAPI}/phim/stale")
+    key=$(hash_url "${API_BASE}/phim/stale")
     printf '{"stale":true}' > "$CACHE/$key.json"
     touch -d "2 hours ago" "$CACHE/$key.json"
     local out
@@ -1146,9 +1369,12 @@ TESTS=(
     sanitize_field
     add_menu_numbers
     format_movie_items
-    get_base_url
     parse_v1_items
     parse_phimapi_v3
+    parse_vsmov_items
+    parse_vsmov_player_page
+    resolve_stream_url
+    vsmov_proxy_selftest
     hash_url
     hls_absolutize_url
     hls_strip_ads
@@ -1156,10 +1382,13 @@ TESTS=(
     hls_strip_ads_structural
     hls_strip_ads_structural_control
     hls_pick_variant
+    hls_pick_variant_no_resolution
     hls_strip_uri_attrs
     hls_fetch_clean_ok
     hls_fetch_clean_fallback
+    hls_fetch_clean_download_mode
     hls_fetch_clean_cache_fallback
+    hls_fetch_clean_rejects_non_playlist
     hls_fetch_clean_quality
     hls_fetch_clean_canary
     hls_rebase_convertv_rewrites_playlist
@@ -1172,9 +1401,13 @@ TESTS=(
     toggle_ad_block
     clear_cache_removes_all
     download_episode_vietnamese_name
+    download_episode_ad_free
+    download_episode_vsmov
+    view_downloads_status
     handle_cli_args
     is_cache_fresh
     record_history
+    resolve_saved_url
     history_select
     record_progress
     add_favorite
