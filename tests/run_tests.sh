@@ -98,8 +98,8 @@ test_format_movie_items() {
     local input="Phim Test|2026 [FHD-Vietsub]|Nhật Bản|Tập 10|phim-test|https://img.url/p.jpg"
     local out
     out=$(format_movie_items <<< "$input")
-    local field1 field2 field3 field4 field5 field6 field7
-    IFS='|' read -r field1 field2 field3 field4 field5 field6 field7 <<< "$out"
+    local field1 field2 field3 field4 field5 field6 field7 field8
+    IFS='|' read -r field1 field2 field3 field4 field5 field6 field7 field8 <<< "$out"
     assert_contains "$field1" "Phim Test" "display contains title" || return 1
     assert_contains "$field1" "2026 [FHD-Vietsub]" "display contains tag" || return 1
     assert_contains "$field1" "[Tập 10]" "display contains ep" || return 1
@@ -109,6 +109,12 @@ test_format_movie_items() {
     assert_eq "Tập 10" "$field5" "field 5 is ep" || return 1
     assert_eq "phim-test" "$field6" "field 6 is slug" || return 1
     assert_eq "https://img.url/p.jpg" "$field7" "field 7 is poster" || return 1
+    assert_eq "" "$field8" "field 8 is empty without source" || return 1
+
+    out=$(format_movie_items <<< "$input|vsmov")
+    IFS='|' read -r field1 _ _ _ _ _ _ field8 <<< "$out"
+    assert_contains "$field1" "[VSMov]" "display shows source" || return 1
+    assert_eq "vsmov" "$field8" "field 8 carries source" || return 1
 }
 
 test_parse_v1_items() {
@@ -576,6 +582,7 @@ test_load_settings() {
     assert_eq "" "$QUALITY" "default quality" || return 1
     assert_eq 1 "$AD_BLOCK" "default ad_block" || return 1
     assert_eq "vsmov" "$SOURCE" "default source" || return 1
+    assert_eq "vsmov,nguonc,phimapi" "$SEARCH_SOURCES" "default search sources" || return 1
 
     # With config present: quoted values, whitespace, comments, invalid lines.
     printf 'PLAYER_DEFAULT = "vlc"\n' > "$CONFIG_FILE"
@@ -584,10 +591,12 @@ test_load_settings() {
     printf 'BOGUS_KEY=1\n' >> "$CONFIG_FILE"
     printf 'QUALITY=999\n' >> "$CONFIG_FILE"
     printf 'SOURCE=phimapi\n' >> "$CONFIG_FILE"
+    printf 'SEARCH_SOURCES=vsmov, nguonc,vsmov\n' >> "$CONFIG_FILE"
     load_settings
     assert_eq "vlc" "$PLAYER_DEFAULT" "quoted player" || return 1
     assert_eq "720" "$QUALITY" "quality" || return 1
     assert_eq "phimapi" "$SOURCE" "source" || return 1
+    assert_eq "vsmov,nguonc" "$SEARCH_SOURCES" "search sources parsed and deduped" || return 1
 
     printf 'SOURCE=nguonc\n' > "$CONFIG_FILE"
     SOURCE=vsmov
@@ -607,18 +616,21 @@ test_save_settings() {
     QUALITY=480
     AD_BLOCK=0
     SOURCE=vsmov
+    SEARCH_SOURCES="vsmov,nguonc"
     save_settings
     assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
     assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
     assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
     assert_eq "SOURCE=vsmov" "$(sed -n 4p "$CONFIG_FILE")" "config source" || return 1
+    assert_eq "SEARCH_SOURCES=vsmov,nguonc" "$(sed -n 5p "$CONFIG_FILE")" "config search sources" || return 1
     # Round-trip through load_settings.
-    PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1 SOURCE=phimapi
+    PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1 SOURCE=phimapi SEARCH_SOURCES=phimapi
     load_settings
     assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
     assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
     assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
     assert_eq "vsmov" "$SOURCE" "roundtrip source" || return 1
+    assert_eq "vsmov,nguonc" "$SEARCH_SOURCES" "roundtrip search sources" || return 1
 }
 
 test_clear_cache_removes_all() {

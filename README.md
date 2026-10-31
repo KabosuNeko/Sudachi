@@ -15,6 +15,7 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 ## Điểm chính
 
 - **Nguồn phim**: VSMov (mặc định), NguonC và PhimAPI — đổi trong Cài đặt → Nguồn phim
+- **Tìm nhiều nguồn**: chọn các nguồn trong Cài đặt → Nguồn tìm kiếm; kết quả gộp và gắn nhãn nguồn
 - **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
 - **Tải tập**: `yt-dlp` đa luồng (aria2c hoặc HLS native), thông báo desktop khi xong
 - **Poster trong terminal**: preview bằng `chafa` (Kitty/Sixel)
@@ -94,7 +95,7 @@ Tự tạo tại `~/.config/sudachi/`:
 
 | File | Nội dung |
 |---|---|
-| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=phimapi\|vsmov\|nguonc`) |
+| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=...`), nguồn tìm kiếm (`SEARCH_SOURCES=vsmov,nguonc,phimapi`) |
 | `history.log` · `favorites.log` · `progress.log` | Lịch sử xem, yêu thích, tập đang xem dở |
 | `cache/` | Cache API, poster, playlist đã lọc và clip đã ghép (`Cài đặt → Xóa cache` để dọn) |
 
@@ -105,6 +106,8 @@ Tự tạo tại `~/.config/sudachi/`:
 - **VSMov** (mặc định): `vsmov.com/api`, 1080p, không có ad giữa tập hay watermark `99z2`. Segment TS bị bọc trong header PNG; Sudachi chạy proxy Python cục bộ để bóc header (cần `python3`).
 - **NguonC**: `phim.nguonc.com/api`, nhiều phim bộ/anime. Sudachi bootstrap player trực tiếp, lấy playlist HLS qua proxy cục bộ; không cần Turnstile, không qua K20.
 - **PhimAPI**: `phimapi.com`, nguồn cũ. Phần phát đã cắt khối ad `/v8/`; clip `convertv` vẫn còn chữ tài trợ vì là cảnh phim thật.
+
+**Tìm nhiều nguồn:** mở Cài đặt → Nguồn tìm kiếm, Tab chọn các nguồn muốn tìm. Kết quả gộp chung và có nhãn `[VSMov]`, `[NguonC]`, `[PhimAPI]`; chọn kết quả nào thì phát đúng nguồn đó.
 
 OPhim đã chết. Các nguồn đều là bên thứ ba và có thể chết bất cứ lúc nào.
 

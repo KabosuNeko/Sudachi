@@ -40,15 +40,16 @@ No build step. Validate syntax only: `bash -n sudachi.sh`.
 ## Runtime config
 
 Auto-created at `~/.config/sudachi/`:
-- `config` — `PLAYER_DEFAULT` (mpv/vlc) + `QUALITY` (1080/720/480/auto) + `AD_BLOCK` (1/0) + `SOURCE` (vsmov/nguonc/phimapi)
+- `config` — `PLAYER_DEFAULT` (mpv/vlc) + `QUALITY` (1080/720/480/auto) + `AD_BLOCK` (1/0) + `SOURCE` (vsmov/nguonc/phimapi) + `SEARCH_SOURCES` (comma-separated)
 - `history.log`, `favorites.log`, `progress.log` — pipe-delimited records
 - `cache/` — JSON cache per URL hash (3600s TTL)
 - `cache/debug.log` — debug output (appended, never rotated)
 
 ## API sources
 
-Three sources, selected with `SOURCE` in `config` (or Cài Đặt → Nguồn phim). `set_api_base`
-maps the source to `API_BASE` and every `call_api` endpoint is relative to it.
+Three sources. `SOURCE` is the primary source (browse/new/anime); `SEARCH_SOURCES`
+is the comma-separated list searched together (Cài Đặt → Nguồn tìm kiếm).
+`set_api_base` maps `SOURCE` to `API_BASE`; every `call_api` endpoint is relative to it.
 
 - **`vsmov`** (default): `https://vsmov.com/api`. Endpoints: `/danh-sach/*`, `/phim/{slug}`,
   `/tim-kiem`, `/the-loai/{slug}`, `/quoc-gia/{slug}`, `/nam/{year}`; list responses are
@@ -70,9 +71,12 @@ maps the source to `API_BASE` and every `call_api` endpoint is relative to it.
 
 `ophim1.com` is dead. All live sources are third-party and can disappear.
 
-`create_search_script` and `create_preview_script` bake `API_BASE`/`SOURCE` at creation
-time. Helpers are embedded with `declare -f`; keep `parse_v1_items` and
-`parse_vsmov_items` self-contained (no globals other than `$1`, `$2`).
+`create_search_script` loops over `SEARCH_SOURCES`, tags each result with its source,
+and pipes everything through `format_movie_items` (8th field = source). `watch_episode`
+takes an optional source argument, sets `SOURCE`/`API_BASE` for the episode picker, then
+restores them. `create_preview_script` reads the result's source field and selects the
+matching API base/detail path. Helpers are embedded with `declare -f`; keep
+`parse_v1_items`, `parse_vsmov_items`, `parse_nguonc_items` self-contained.
 
 ## Key bindings (episode picker)
 
@@ -93,7 +97,7 @@ Main menu (`main_menu()`) shows all items:
 - **FZF_OPTS** global array — all fzf calls reuse it.
 - **Cache**: URL → MD5 hash → JSON file. Fresh for 3600s. Cleared manually (`Cài Đặt → Xóa Cache` — removes API JSON, cached posters/descriptions in `cache/desc/`, cleaned `*-clean.m3u8` / `*-dl.m3u8` playlists, `hls-proxy.py`/`.log`, and `cache/segments/`; `downloads/` and `debug.log` stay).
 - **Temp scripts**: `create_preview_script` / `create_search_script` write standalone shell scripts under `$CACHE/`. Cleaned on exit via `trap cleanup EXIT SIGINT SIGTERM`. **Values must be baked at creation time** — subprocesses have no access to parent shell variables. Helpers are embedded with `declare -f` (`format_movie_items`, `parse_v1_items`, `parse_vsmov_items`, `parse_nguonc_items`, `hash_url`).
-- **Preview script** uses `IFS='|' read -r` on the fzf-selected line (7-field pipe-delimited record).
+- **Preview script** uses `IFS='|' read -r` on the fzf-selected line (8-field record; field 8 is the source).
 - **Downloads**: `tasks.log` rows are `title|file|log`; the subshell writes the exit status to `<log>.rc` and `view_downloads` keys the status off that file (no more PID or "file exists" guessing). Legacy `pid|title|file|log` rows are still parsed.
 - **History**: rows are `timestamp|title|slug|url|ep`; old 4-field rows still parse (ep empty). `history()` and `-c` call `resolve_saved_url` to refresh the stream link from the current source, falling back to the stored URL when the episode cannot be resolved.
 - **`sanitize_field`** normalizes newlines, trims, replaces `|` — used for display fields in pipe-delimited records.

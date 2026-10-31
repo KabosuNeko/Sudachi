@@ -23,6 +23,7 @@ API_PHIMAPI="https://phimapi.com"
 API_VSMOV="https://vsmov.com/api"
 API_NGUONC="https://phim.nguonc.com/api"
 SOURCE="vsmov"
+SEARCH_SOURCES="vsmov,nguonc,phimapi"
 API_BASE="$API_VSMOV"
 USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 HLS_PROXY_PID=""
@@ -60,7 +61,8 @@ C_M='\033[1;35m'
 C_R='\033[0m'
 
 load_settings() {
-    local line key value
+    local line key value item list
+    local -a srcs=()
 
     [[ -f "$CONFIG_FILE" ]] || return
 
@@ -103,6 +105,20 @@ load_settings() {
                     phimapi|vsmov|nguonc) SOURCE="$value" ;;
                 esac
                 ;;
+            SEARCH_SOURCES)
+                list=""
+                IFS=',' read -ra srcs <<< "$value"
+                for item in "${srcs[@]}"; do
+                    item="${item//[[:space:]]/}"
+                    case "$item" in
+                        phimapi|vsmov|nguonc) ;;
+                        *) continue ;;
+                    esac
+                    [[ ",$list," == *",$item,"* ]] && continue
+                    list+="${list:+,}$item"
+                done
+                [[ -n "$list" ]] && SEARCH_SOURCES="$list"
+                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -113,6 +129,7 @@ save_settings() {
         printf 'QUALITY=%s\n' "$QUALITY"
         printf 'AD_BLOCK=%s\n' "$AD_BLOCK"
         printf 'SOURCE=%s\n' "$SOURCE"
+        printf 'SEARCH_SOURCES=%s\n' "$SEARCH_SOURCES"
     } > "$CONFIG_FILE"
 }
 
@@ -129,6 +146,7 @@ format_movie_items() {
         ep = $4
         slug = $5
         poster = $6
+        src = $7
 
         display_tag = ""
         if (tag != "" && tag != "N/A") {
@@ -138,8 +156,16 @@ format_movie_items() {
             display_tag = display_tag "  \033[0;36m[" ep "]\033[0m"
         }
 
+        if (src != "") {
+            label = src
+            if (src == "phimapi") label = "PhimAPI"
+            else if (src == "vsmov") label = "VSMov"
+            else if (src == "nguonc") label = "NguonC"
+            display_tag = display_tag "  \033[0;32m[" label "]\033[0m"
+        }
+
         display = sprintf("\033[0;33m%2d.\033[0m  \033[1;37m%s\033[0m%s", NR, name, display_tag)
-        printf "%s|%s|%s|%s|%s|%s|%s\n", display, name, tag, country, ep, slug, poster
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n", display, name, tag, country, ep, slug, poster, src
     }'
 }
 
@@ -184,11 +210,14 @@ check_dependencies() {
         exit 1
     fi
 
-    # VSMov/NguonC playback needs the local HLS proxy.
-    if [[ "$SOURCE" == "vsmov" || "$SOURCE" == "nguonc" ]] && ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${C_Y}Nguồn này cần python3, tạm chuyển sang PhimAPI.${C_R}"
-        SOURCE="phimapi"
-        set_api_base
+    # VSMov/NguonC need the local HLS proxy.
+    if ! command -v python3 >/dev/null 2>&1; then
+        if [[ "$SOURCE" == "vsmov" || "$SOURCE" == "nguonc" ]]; then
+            echo -e "${C_Y}Nguồn này cần python3, tạm chuyển sang PhimAPI.${C_R}"
+            SOURCE="phimapi"
+            set_api_base
+        fi
+        SEARCH_SOURCES="phimapi"
     fi
 }
 
@@ -1176,12 +1205,13 @@ record_progress() {
 }
 
 add_favorite() {
-    local title="$1" slug="$2" year="$3" poster="$4"
+    local title="$1" slug="$2" year="$3" poster="$4" src="${5:-}"
     local tmp
-    local safe_title safe_year safe_poster
+    local safe_title safe_year safe_poster safe_src
     safe_title=$(sanitize_field "$title")
     safe_year=$(sanitize_field "$year")
     safe_poster=$(sanitize_field "$poster")
+    safe_src=$(sanitize_field "$src")
     printf -v timestamp '%(%s)T' -1
 
     tmp=$(mktemp "$CACHE/favorites.XXXXXX") || return 1
@@ -1194,7 +1224,7 @@ add_favorite() {
         return 1
     fi
 
-    printf '%s|%s|%s|%s|%s\n' "$timestamp" "$safe_title" "$slug" "$safe_year" "$safe_poster" >> "$tmp"
+    printf '%s|%s|%s|%s|%s|%s\n' "$timestamp" "$safe_title" "$slug" "$safe_year" "$safe_poster" "$safe_src" >> "$tmp"
     mv "$tmp" "$FAV"
 }
 
@@ -1496,10 +1526,9 @@ create_preview_script() {
     script=$(mktemp "$CACHE/preview.XXXXXX.sh") || return 1
     register_temp "$script"
 
-    local api_base="$API_BASE"
-    local source_key="$SOURCE"
-    local detail_prefix="/phim/"
-    [[ "$SOURCE" == "nguonc" ]] && detail_prefix="/film/"
+    local api_phimapi="$API_PHIMAPI"
+    local api_vsmov="$API_VSMOV"
+    local api_nguonc="$API_NGUONC"
 
     cat > "$script" << EOF
 #!/bin/bash
@@ -1523,6 +1552,14 @@ else
     ten=\$(echo "\$ten" | sed 's/^[0-9]*\. //')
 fi
 
+src="\${parts[7]:-}"
+[[ -z "\$src" ]] && src="$SOURCE"
+case "\$src" in
+    vsmov)  api_base="$api_vsmov"; detail_prefix="/phim/" ;;
+    nguonc) api_base="$api_nguonc"; detail_prefix="/film/" ;;
+    *)      api_base="$api_phimapi"; detail_prefix="/phim/" ;;
+esac
+
 origin_name=""
 time_dur=""
 cats=""
@@ -1531,12 +1568,12 @@ clean_content=""
 if [[ -n "\$slug" && "\$slug" != "null" ]]; then
     desc_cache="$CACHE/desc"
     mkdir -p "\$desc_cache"
-    detail_cache="\$desc_cache/${source_key}-\${slug}.json"
+    detail_cache="\$desc_cache/\${src}-\${slug}.json"
 
     if [[ -f "\$detail_cache" ]]; then
         detail_res=\$(cat "\$detail_cache")
     else
-        detail_res=\$(curl -fsS --max-time 2 "${api_base}${detail_prefix}\${slug}" 2>/dev/null)
+        detail_res=\$(curl -fsS --max-time 2 "\${api_base}\${detail_prefix}\${slug}" 2>/dev/null)
         [[ -n "\$detail_res" ]] && printf '%s' "\$detail_res" > "\$detail_cache"
     fi
 
@@ -1590,7 +1627,7 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
         echo ""
         [[ "\$chafa_fmt" == "kitty" ]] && printf '\033_Ga=d,d=A\033\\'
 
-        cache_key="${source_key}-\${slug:-\$(hash_url "\$img_url")}"
+        cache_key="\${src}-\${slug:-\$(hash_url "\$img_url")}"
         img_cache="\$desc_cache/\${cache_key}.img"
         if [[ ! -s "\$img_cache" ]]; then
             curl -fsS --max-time 4 "\$img_url" -o "\$img_cache" 2>/dev/null
@@ -1680,7 +1717,7 @@ pick_server() {
     printf '%s\n' "$idx"
 }
 
-watch_episode() {
+_watch_episode_body() {
     local slug="$1" ten="$2"
 
     show_loading
@@ -1761,10 +1798,24 @@ watch_episode() {
                 download_episode "$url" "$tieu_de"
                 ;;
             ctrl-f)
-                add_favorite "$ten" "$slug" "" "" || show_error "Không lưu được yêu thích"
+                add_favorite "$ten" "$slug" "" "" "$SOURCE" || show_error "Không lưu được yêu thích"
                 ;;
         esac
     done
+}
+
+watch_episode() {
+    local src="${3:-$SOURCE}" prev_source="$SOURCE" prev_api="$API_BASE" rc
+
+    if [[ "$src" != "$SOURCE" ]]; then
+        SOURCE="$src"
+        set_api_base
+    fi
+    _watch_episode_body "$1" "$2"
+    rc=$?
+    SOURCE="$prev_source"
+    API_BASE="$prev_api"
+    return $rc
 }
 
 show_list() {
@@ -1789,7 +1840,7 @@ show_list() {
     if [[ -n "$chon" ]]; then
         local arr=()
         IFS='|' read -ra arr <<< "$chon"
-        watch_episode "${arr[5]}" "${arr[1]}"
+        watch_episode "${arr[5]}" "${arr[1]}" "${arr[7]:-}"
     fi
 }
 
@@ -1843,7 +1894,7 @@ show_paginated_list() {
                 if [[ -n "$chon" ]]; then
                     local arr=()
                     IFS='|' read -ra arr <<< "$chon"
-                    watch_episode "${arr[5]}" "${arr[1]}"
+                    watch_episode "${arr[5]}" "${arr[1]}" "${arr[7]:-}"
                 fi
                 return
                 ;;
@@ -1884,50 +1935,48 @@ fetch_list() {
 }
 
 create_search_script() {
-    local script
+    local script sources="$SEARCH_SOURCES"
+    [[ -z "$sources" ]] && sources="$SOURCE"
     script=$(mktemp "$CACHE/search.XXXXXX.sh") || return 1
     register_temp "$script"
-    if [[ "$SOURCE" == "nguonc" ]]; then
-        cat > "$script" << EOF
+    cat > "$script" << EOF
 #!/bin/bash
 $(declare -f format_movie_items)
+$(declare -f parse_v1_items)
+$(declare -f parse_vsmov_items)
 $(declare -f parse_nguonc_items)
 
 [[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
 q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
-res=\$(curl -fsS --max-time 5 "${API_BASE}/films/search?keyword=\${q}" 2>/dev/null)
-[[ -z "\$res" ]] && exit 0
-parse_nguonc_items "\$res" | format_movie_items
+for src in ${sources//,/ }; do
+    out=""
+    case "\$src" in
+        phimapi)
+            res=\$(curl -fsS --max-time 5 "${API_PHIMAPI}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
+            if [[ -n "\$res" ]]; then
+                cdn=\$(jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""' <<< "\$res")
+                out=\$(parse_v1_items "\$res" "\$cdn")
+            fi
+            ;;
+        vsmov)
+            res=\$(curl -fsS --max-time 5 "${API_VSMOV}/tim-kiem?keyword=\${q}" 2>/dev/null)
+            [[ -n "\$res" ]] && out=\$(parse_vsmov_items "\$res")
+            ;;
+        nguonc)
+            res=\$(curl -fsS --max-time 5 "${API_NGUONC}/films/search?keyword=\${q}" 2>/dev/null)
+            [[ -n "\$res" ]] && out=\$(parse_nguonc_items "\$res")
+            ;;
+    esac
+    [[ -z "\$out" ]] && continue
+    while IFS= read -r line; do
+        printf '%s|%s\n' "\$line" "\$src"
+    done <<< "\$out"
+done | format_movie_items
 EOF
-    elif [[ "$SOURCE" == "vsmov" ]]; then
-        cat > "$script" << EOF
-#!/bin/bash
-$(declare -f format_movie_items)
-$(declare -f parse_vsmov_items)
-
-[[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
-q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
-res=\$(curl -fsS --max-time 5 "${API_BASE}/tim-kiem?keyword=\${q}" 2>/dev/null)
-[[ -z "\$res" ]] && exit 0
-parse_vsmov_items "\$res" | format_movie_items
-EOF
-    else
-        cat > "$script" << EOF
-#!/bin/bash
-$(declare -f format_movie_items)
-$(declare -f parse_v1_items)
-
-[[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
-q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
-res=\$(curl -fsS --max-time 5 "${API_BASE}/v1/api/tim-kiem?keyword=\${q}&limit=20" 2>/dev/null)
-[[ -z "\$res" ]] && exit 0
-cdn=\$(echo "\$res" | jq -r '.data.APP_DOMAIN_CDN_IMAGE // ""')
-parse_v1_items "\$res" "\$cdn" | format_movie_items
-EOF
-    fi
     chmod +x "$script"
     echo "$script"
 }
+
 
 search() {
     local initial_query="$1"
@@ -1954,7 +2003,7 @@ search() {
     if [[ -n "$chon" ]]; then
         local arr=()
         IFS='|' read -ra arr <<< "$chon"
-        watch_episode "${arr[5]}" "${arr[1]}"
+        watch_episode "${arr[5]}" "${arr[1]}" "${arr[7]:-}"
     fi
 }
 
@@ -2179,11 +2228,11 @@ favorites() {
     [[ "$chon" == *$'\n'* ]] && data="${chon#*$'\n'}"
     [[ -z "$data" ]] && return
 
-    local ten slug year poster
-    IFS='|' read -r ten slug year poster <<< "$data"
+    local ten slug year poster src
+    IFS='|' read -r ten slug year poster src <<< "$data"
 
     case "$phim" in
-        enter)  watch_episode "$slug" "$ten" ;;
+        enter)  watch_episode "$slug" "$ten" "$src" ;;
         ctrl-d)
             remove_favorite "$slug" || show_error "Không xóa được yêu thích"
             ;;
@@ -2275,6 +2324,39 @@ toggle_ad_block() {
     sleep 1
 }
 
+source_name() {
+    case "$1" in
+        phimapi) printf '%s' "PhimAPI" ;;
+        vsmov)   printf '%s' "VSMov" ;;
+        nguonc)  printf '%s' "NguonC" ;;
+        *)       printf '%s' "$1" ;;
+    esac
+}
+
+select_search_sources() {
+    local menu="PhimAPI|phimapi"
+    if command -v python3 >/dev/null 2>&1; then
+        menu+="
+VSMov|vsmov
+NguonC|nguonc"
+    fi
+
+    local chon line src out=""
+    chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" --multi \
+        --delimiter='|' --with-nth=1 --prompt="Nguồn tìm kiếm > " --height=40% \
+        --header="Tab chọn nhiều · Enter xác nhận · hiện tại: ${SEARCH_SOURCES}")
+    [[ -z "$chon" ]] && return
+
+    while IFS= read -r line; do
+        src="${line#*|}"
+        out+="${out:+,}$src"
+    done <<< "$chon"
+    [[ -z "$out" ]] && return
+
+    SEARCH_SOURCES="$out"
+    save_settings
+}
+
 select_source() {
     local phimapi_mark="" vsmov_mark="" nguonc_mark=""
     [[ "$SOURCE" == "phimapi" ]] && phimapi_mark=" \033[1;32m(đang dùng)\033[0m"
@@ -2302,15 +2384,17 @@ NguonC${nguonc_mark}|nguonc"
 }
 
 settings() {
-    local ad_status source_status
+    local ad_status source_status search_label="" item
+    local -a srcs=()
     [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
-    case "$SOURCE" in
-        vsmov)  source_status="VSMov" ;;
-        nguonc) source_status="NguonC" ;;
-        *)      source_status="PhimAPI" ;;
-    esac
+    source_status=$(source_name "$SOURCE")
+    IFS=',' read -ra srcs <<< "$SEARCH_SOURCES"
+    for item in "${srcs[@]}"; do
+        search_label+="${search_label:+, }$(source_name "$item")"
+    done
 
     local menu="${I_SOURCE} Nguồn phim: ${source_status}|source
+${I_SOURCE} Nguồn tìm kiếm: ${search_label}|searchsources
 ${I_PLAYER} Trình phát|player
 ${I_QUA} Chất lượng|quality
 󰫈  Chặn quảng cáo: ${ad_status}|adblock
@@ -2325,7 +2409,8 @@ ${I_CACHE} Xóa cache|cache"
     [[ -z "$chon" ]] && return
 
     case "${chon#*|}" in
-        source)    select_source ;;
+        source)         select_source ;;
+        searchsources)  select_search_sources ;;
         player)    select_player ;;
         quality)   select_quality ;;
         adblock)   toggle_ad_block ;;
