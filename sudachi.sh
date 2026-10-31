@@ -210,7 +210,6 @@ check_dependencies() {
         exit 1
     fi
 
-    # VSMov/NguonC need the local HLS proxy.
     if ! command -v python3 >/dev/null 2>&1; then
         if [[ "$SOURCE" == "vsmov" || "$SOURCE" == "nguonc" ]]; then
             echo -e "${C_Y}Nguồn này cần python3, tạm chuyển sang PhimAPI.${C_R}"
@@ -260,21 +259,10 @@ hash_url() {
     printf '%s' "$input" | cksum | cut -d' ' -f1
 }
 
-# HLS_AD_PATTERNS -- awk ERE alternation matching standalone video ad URIs.
-# Standalone video ads (gambling commercials, slot machine clips) live in
-# dedicated paths like /v[0-9]+/<hash>/segment_ or ads*/, promo*/.
-# Note: convertv[0-9]+/ segments are NOT video commercials; they are the actual
-# movie/anime scenes with a sponsor text watermark re-encoded on top. Dropping
-# convertv* cuts real movie dialogue and content, so they must be kept.
-# Pattern matches are complemented by structural detection (Tier 2) in
-# hls_strip_ads: a #EXT-X-KEY:METHOD=NONE block is dropped until movie content
-# in the playlist's own directory appears, so renamed ad paths survive less.
+# Ad paths: ads*/promo*/v*/<hash>/. convertv* is movie content, not an ad.
 HLS_AD_PATTERNS='(^|/)ads?[0-9]*/|(^|/)promo[0-9]*/|(^|/)v[0-9]+/[0-9a-f]+/segment_'
 
-# hls_absolutize_url <base> <uri> -- resolve a playlist URI against a base URL.
-# Pure bash, no curl. Echoes: absolute uris as-is, root-relative uris prefixed
-# with scheme://host of base, relative uris joined to the base directory, and
-# an empty string for an empty uri.
+# hls_absolutize_url <base> <uri> -- resolve a playlist URI against base.
 hls_absolutize_url() {
     local base="$1" uri="$2" scheme rest host dir
 
@@ -302,22 +290,8 @@ hls_absolutize_url() {
     esac
 }
 
-# hls_strip_ads <base> -- read a media playlist on stdin, write the filtered
-# playlist to stdout. Drops all mid-roll and pre/post-roll ad segments
-# matching HLS_AD_PATTERNS, preserves all movie segments and their metadata
-# (#EXTINF), and emits a single #EXT-X-DISCONTINUITY at each ad splice point
-# so the player resets its PTS timeline correctly. Header normalization:
-# strips #EXT-X-DISCONTINUITY-SEQUENCE (its index shifts after ad removal and
-# poisons ffmpeg seek tables) and guarantees #EXT-X-PLAYLIST-TYPE:VOD.
-# Segments resolving into the playlist's own directory are movie content and
-# are never treated as ads, even when they match HLS_AD_PATTERNS.
-# Tier 2 structural detection: a #EXT-X-KEY:METHOD=NONE tag opens a candidate
-# block; every following segment outside the playlist's own directory is
-# treated as an ad until a movie segment appears, so a renamed ad CDN path is
-# still removed even when HLS_AD_PATTERNS no longer matches.
-# Segment URIs are absolutized directly in awk for high performance, and URI
-# attributes of #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA lines are rewritten the
-# same way so the cached local playlist still references remote keys/maps.
+# hls_strip_ads <base> -- drop ad segments, keep movie segments, mark splices.
+# Own-dir segments are never ads; METHOD=NONE opens a block for renamed paths.
 hls_strip_ads() {
     local base="$1" basedir basehost
     basedir="${base%/*}"
@@ -352,12 +326,8 @@ hls_strip_ads() {
             if ($0 ~ /^#EXT-X-PLAYLIST-TYPE/) { next }
             if ($0 ~ /^#EXT-X-DISCONTINUITY-SEQUENCE/) { next }
 
-            # Segment URI line (non-comment, non-empty).
             if ($0 !~ /^#/ && $0 != "") {
-                # Tier 2 candidate block (opened by METHOD=NONE): any segment
-                # outside the playlist directory is an ad until movie content
-                # appears. seg_is_movie is checked first so own-dir segments
-                # are never dropped and close the block.
+                # METHOD=NONE block: drop out-of-dir segments until movie content.
                 if (cand && !seg_is_movie($0)) {
                     in_ad = 1
                     had_ad = 1
@@ -372,7 +342,6 @@ hls_strip_ads() {
                     ad_pend_n = 0
                     next
                 }
-                # Movie segment
                 if (in_ad) {
                     in_ad = 0
                 }
@@ -395,7 +364,6 @@ hls_strip_ads() {
                 next
             }
 
-            # ENDLIST must terminate ad block and pass through
             if ($0 ~ /^#EXT-X-ENDLIST/) {
                 in_ad = 0
                 cand = 0
@@ -405,7 +373,6 @@ hls_strip_ads() {
                 next
             }
 
-            # Tag lines inside ad block
             if (in_ad) {
                 if ($0 ~ /^#EXT-X-KEY/ && $0 ~ /METHOD=NONE/) { cand = 1 }
                 if ($0 ~ /^#EXTINF/) {
@@ -416,7 +383,6 @@ hls_strip_ads() {
                 next
             }
 
-            # Tag lines before movie segments
             if ($0 ~ /^#EXT-X-DISCONTINUITY$/) {
                 pend[pend_n++] = $0
                 next
@@ -431,9 +397,7 @@ hls_strip_ads() {
                 next
             }
 
-            # Any other line (headers, EXT-X-MAP/MEDIA/...): flush and pass,
-            # absolutizing any URI attribute so a cached local playlist still
-            # points at remote keys/maps.
+            # Flush pending tags and absolutize URI attrs.
             for (i = 0; i < pend_n; i++) print pend[i]
             pend_n = 0
             print rewrite_uri($0)
@@ -444,11 +408,7 @@ hls_strip_ads() {
     '
 }
 
-# hls_pick_variant <master-playlist> <quality> -- pick the media variant URI
-# from a master playlist. Empty/auto quality picks the highest resolution
-# (then highest bandwidth); a numeric quality picks the largest height that
-# does not exceed it, falling back to the smallest variant. Echoes nothing
-# when the master has no usable variant.
+# hls_pick_variant <master> <quality> -- pick a variant URI.
 hls_pick_variant() {
     awk -v want="$2" '
         /^#EXT-X-STREAM-INF/ {
@@ -480,17 +440,14 @@ hls_pick_variant() {
                 }
                 if (best < 0) best = 0
             }
-            # No RESOLUTION attribute anywhere: still return a variant instead
-            # of nothing, otherwise the caller falls back to the raw master
-            # playlist and ads come back.
+            # No RESOLUTION: pick the first variant, not the ad-carrying master.
             if (best < 1 && n > 0) best = 1
             if (best > 0) print vu[best]
         }
     ' <<< "$1"
 }
 
-# hls_fallback_url <clean-file> <original-url> -- reuse a recent cleaned
-# playlist; segment URLs expire, so a stale cache is worse than the raw URL.
+# hls_fallback_url <clean> <raw> -- recent clean cache, else raw.
 hls_fallback_url() {
     if [[ -s "$1" ]] && is_cache_fresh "$1" 21600; then
         printf '%s' "$1"
@@ -499,36 +456,9 @@ hls_fallback_url() {
     fi
 }
 
-# hls_rebase_convertv <in-playlist-file> <out-playlist-file> <base-url> --
-# convertv* segments are real movie content (ending scenes + credits) whose
-# PTS restarts at ~1.48s; the CDN brackets them with #EXT-X-DISCONTINUITY.
-# Seeking into or across such a cluster makes mpv skip past it or reset to
-# ~1.5s (looks like a restart from the beginning). This rebases each convertv
-# clip onto the movie timeline. Consecutive convertv clips form a cluster;
-# each cluster is anchored on the movie segment immediately before it (empty
-# anchor at playlist start = cursor 0) and chained from there, so a playlist
-# with several clusters separated by movie content keeps every cluster on its
-# own timeline. The clip is downloaded (cached under $CACHE/segments/) and
-# stream-copied with a constant PTS offset so its first video PTS equals the
-# running cursor (anchor end, then the end of each rebased clip in the
-# cluster):
-#   ffmpeg -loglevel error -nostdin -y -itsoffset <cursor-first_pts> -i <in> \
-#          -c copy -copyts -muxdelay 0 -muxpreload 0 -f mpegts <out>
-# -itsoffset shifts every packet and -copyts keeps the shifted timestamps
-# (without -copyts ffmpeg re-normalizes the output to 0); -muxdelay and
-# -muxpreload 0 stop the mpegts muxer from adding its default 0.7s delay.
-# Verified against the Frieren s6 CDN: first video PTS lands exactly on the
-# cursor and the packet layout (h264 + aac) is unchanged. When the shift would
-# be negative (no preceding movie segment, cursor 0) the clip is normalized to
-# the cursor with -output_ts_offset instead. Rebased copies are cached as
-# $CACHE/segments/<hash>-r.ts and reused when their first PTS still matches
-# the cursor; otherwise they are rebuilt from the cached download. Writes
-# <out>: convertv URI lines become local rebased paths, every
-# #EXT-X-DISCONTINUITY is removed (the timeline is continuous again), EXTINF
-# and all other lines are kept as-is. Returns 1 when ffmpeg/ffprobe are
-# missing, the playlist has no convertv segment, or any download/probe/rebase
-# step fails -- the caller then keeps the un-rebased playlist so playback
-# never breaks.
+# hls_rebase_convertv -- rebase convertv clips (real movie content) onto the
+# preceding movie PTS so seek does not reset. Any failure leaves the playlist
+# untouched.
 hls_rebase_convertv() {
     local in="$1" out="$2" base="$3"
     local segdir="$CACHE/segments"
@@ -541,8 +471,6 @@ hls_rebase_convertv() {
     [[ -f "$in" ]] || return 1
     grep -qE 'convertv[0-9]*/' "$in" || return 1
 
-    # Private helpers for this pipeline; "-f mpegts" keeps ffprobe/ffmpeg from
-    # parsing a mis-downloaded file as an HLS playlist and touching the network.
     _rebase_fetch() { # <abs-url> <cache-file>; 1 on download failure
         local tmp="$2.part.$$"
         [[ -s "$2" ]] && return 0
@@ -562,9 +490,6 @@ hls_rebase_convertv() {
         awk -v r="$rate" 'BEGIN{split(r,a,"/"); if (a[1]+0 > 0 && a[2]+0 > 0) printf "%.6f", a[2]/a[1]; else print "0"}'
     }
 
-    # Convertv clips in playlist order, grouped into clusters: consecutive
-    # convertv lines share one anchor, the movie segment immediately before the
-    # first clip of the cluster (empty when the cluster starts the playlist).
     local -a cluster_anchor=() cluster_first=()
     local in_cluster=0
     while IFS= read -r line; do
@@ -585,9 +510,6 @@ hls_rebase_convertv() {
     [[ ${#clips[@]} -gt 0 ]] || return 1
     mkdir -p "$segdir" || return 1
 
-    # Resolve every source file first and prefetch the missing ones in
-    # parallel batches (4 at a time) so the first play does not wait for seven
-    # sequential downloads.
     local -a urls=() hashes=() srcs=() need_urls=() need_files=() anchorsrc=()
     local ci a h
     for ((ci = 0; ci < ${#cluster_anchor[@]}; ci++)); do
@@ -623,9 +545,6 @@ hls_rebase_convertv() {
         done
     fi
 
-    # Rebase each cluster from its own anchor, in playlist order; rebased[] is
-    # appended in playlist order so the i-th convertv line maps to the i-th
-    # rebased path in the final rewrite.
     local c idx=0 end
     for c in "${!cluster_anchor[@]}"; do
         if [[ -n "${anchorsrc[c]}" ]]; then
@@ -647,8 +566,6 @@ hls_rebase_convertv() {
             src="${srcs[idx]}"
             dst="$segdir/$hash-r.ts"
 
-            # Cached rebased clip is usable only when it still starts at the
-            # current cursor (the same URI may be republished in another timeline).
             if [[ -s "$dst" ]]; then
                 local dst_pts
                 dst_pts=$(_rebase_pts "$dst") || return 1
@@ -665,8 +582,6 @@ hls_rebase_convertv() {
             out_pts=$(_rebase_pts "$src") || return 1
             read -r p_first p_last <<< "$out_pts"
 
-            # Write to a temp name so an interrupted rebase can never leave a
-            # truncated dst that the cursor check might mistake for a good one.
             printf '  Đang ghép đoạn tài trợ %d/%d...\n' "$((idx + 1))" "${#clips[@]}" >&2
             local dst_tmp="$dst.part.$$"
             shift=$(awk -v c="$cursor" -v f="$p_first" 'BEGIN{printf "%.6f", c-f}')
@@ -679,7 +594,6 @@ hls_rebase_convertv() {
             fi
             [[ -s "$dst_tmp" ]] || { rm -f "$dst_tmp"; return 1; }
 
-            # The stream codecs must survive the stream copy (video + audio).
             local src_codecs dst_codecs
             src_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$src" 2>/dev/null | sort -u | tr '\n' ' ')
             dst_codecs=$(ffprobe -f mpegts -v error -show_entries stream=codec_type -of csv=p=0 "$dst_tmp" 2>/dev/null | sort -u | tr '\n' ' ')
@@ -687,7 +601,6 @@ hls_rebase_convertv() {
 
             out_pts=$(_rebase_pts "$dst_tmp") || { rm -f "$dst_tmp"; return 1; }
             read -r dst_first p_last <<< "$out_pts"
-            # The stream copy must have landed the clip exactly on the cursor.
             awk -v a="$dst_first" -v b="$cursor" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d<0.5)}' \
                 || { rm -f "$dst_tmp"; return 1; }
             fdur=$(_rebase_framedur "$dst_tmp")
@@ -716,9 +629,7 @@ hls_rebase_convertv() {
     return 0
 }
 
-# hls_fetch_clean <url> [play|dl] -- strip ad segments and cache the cleaned
-# playlist as $CACHE/<hash>-clean.m3u8 (or -dl.m3u8). Play mode also rebases
-# convertv clips. A fetch failure reuses a recent cache, then the raw URL.
+# hls_fetch_clean <url> [play|dl] -- cache a stripped playlist; fallback to raw.
 hls_fetch_clean() {
     local url="$1" mode="${2:-play}"
     local master variant media out tmp tmp2 hash clean suffix
@@ -754,9 +665,7 @@ hls_fetch_clean() {
         hls_fallback_url "$clean" "$url"
         return 0
     fi
-    # Canary: many DISCONTINUITY tags but zero ad-pattern matches means the
-    # CDN likely changed its ad URI layout -- flag it so HLS_AD_PATTERNS can
-    # be updated before users just accept the ads returning.
+    # Canary: DISCONTINUITY but no ad match means the CDN layout changed.
     if [ "$(printf '%s\n' "$out" | grep -c '^#EXT-X-DISCONTINUITY$')" -ge 2 ] && \
        ! printf '%s\n' "$out" | grep -qE "$HLS_AD_PATTERNS"; then
         log_debug "hls_fetch_clean: $media has DISCONTINUITY but no ad-pattern match — HLS_AD_PATTERNS may need updating"
@@ -833,8 +742,7 @@ resolve_stream_url() {
     printf '%s' "$resolved"
 }
 
-# resolve_nguonc_embed <embed-url> -- bootstrap the NguonC player; sets
-# NGUONC_PLAYLIST and NGUONC_ORIGIN for the local proxy.
+# resolve_nguonc_embed <embed> -- set NGUONC_PLAYLIST/NGUONC_ORIGIN.
 resolve_nguonc_embed() {
     local embed="$1" host hash body playlist turnstile format
 
@@ -857,8 +765,7 @@ resolve_nguonc_embed() {
     return 0
 }
 
-# resolve_saved_url <slug> <ep> [stored-url] -- refresh a history link; never
-# resolve a stored URL from the other source because slugs can collide.
+# resolve_saved_url <slug> <ep> [stored] -- refresh a history link, source-aware.
 resolve_saved_url() {
     local slug="$1" ep="$2" stored="${3:-}" res url expected
 
@@ -890,8 +797,7 @@ resolve_saved_url() {
     printf '%s' "$url"
 }
 
-# create_hls_proxy_script -- cache the PNG-stripping proxy. VSMov wraps each
-# TS segment in a PNG header, which ffmpeg refuses to read.
+# create_hls_proxy_script -- cache the local HLS proxy.
 create_hls_proxy_script() {
     local script="$CACHE/hls-proxy.py" tmp
     if [[ -s "$script" ]] && grep -q '^# hls-proxy v3' "$script"; then
@@ -1058,9 +964,8 @@ PY
     fi
 }
 
-# start_hls_proxy <playlist-url> [origin] [referer] [port-key] -- set
-# HLS_PROXY_URL to a local proxy playlist. The port is derived from port-key
-# (default: the playlist URL) so mpv resume survives token changes.
+# start_hls_proxy <url> [origin] [referer] [key] -- set HLS_PROXY_URL;
+# stable port from key keeps mpv resume.
 start_hls_proxy() {
     local url="$1" origin="${2:-}" referer="${3:-https://v9.streamvsmov.com/}" port_key="${4:-$1}"
     local script portfile port i proxy_url seed attempt
@@ -1141,22 +1046,15 @@ sanitize_field() {
 call_api() {
     local endpoint="$1"
     local url="${API_BASE}${endpoint}"
-
-
     local cache_key
     cache_key=$(hash_url "$url")
     local cache_file="$CACHE/${cache_key}.json"
 
-    if [[ -f "$cache_file" ]]; then
-        if is_cache_fresh "$cache_file" 3600; then
-            cat "$cache_file"
-            return
-        else
-            rm -f "$cache_file"
-        fi
+    if [[ -f "$cache_file" ]] && is_cache_fresh "$cache_file" 3600; then
+        cat "$cache_file"
+        return
     fi
-
-
+    rm -f "$cache_file"
     local res attempt
     for attempt in 1 2 3; do
         res=$(curl -fsS --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
@@ -1299,7 +1197,6 @@ download_episode() {
     (
         # The subshell owns its proxy; do not touch a playback proxy.
         HLS_PROXY_PID=""
-        HLS_PROXY_URL=""
         trap 'stop_hls_proxy' EXIT
         local rc
         if [[ $is_proxy -eq 1 ]]; then
@@ -1344,8 +1241,7 @@ view_downloads() {
     printf -v now '%(%s)T' -1
     while IFS='|' read -r f1 f2 f3 f4; do
         [[ -z "$f1" ]] && continue
-        # Legacy rows were pid|title|file|log; current rows are title|file|log
-        # with the exit status in <log>.rc.
+        # Legacy rows are pid|title|file|log; current rows use <log>.rc.
         if [[ -n "$f4" ]]; then
             row_title="$f2"; file="$f3"; log="$f4"
         else
@@ -1444,11 +1340,7 @@ play_video() {
 
     case "$PLAYER_DEFAULT" in
         vlc)
-            # Accurate seek + remote-stream buffering for the cleaned HLS
-            # playlist: --no-input-fast-seek makes seeks land on the requested
-            # time instead of the previous keyframe, --network-caching=3000
-            # rides out CDN hiccups on segment fetches. Both are safe for
-            # local/non-HLS playback; --preferred-resolution is kept as-is.
+            # Accurate seek + network buffer for HLS.
             local vlc_args=("$url" "--meta-title=$title" "--no-video-title-show" \
                 "--no-input-fast-seek" "--network-caching=3000" "${extra_args[@]}")
             [[ -n "$QUALITY" ]] && vlc_args+=("--preferred-resolution=$QUALITY")
@@ -1457,26 +1349,18 @@ play_video() {
             ;;
         *)
             local mpv_args=("$url" "--title=$title" "--force-window" "--save-position-on-quit" "${extra_args[@]}")
-            # Seekable demuxer cache for HLS: enables smooth seek on the
-            # cleaned playlist. NOT --force-seekable=yes (breaks HLS, mpv#11990).
+            # Seekable cache; --force-seekable breaks HLS (mpv#11990).
             if [[ "$url" == *".m3u8"* ]]; then
                 mpv_args+=("--cache=yes")
-                # Seekable RAM cache: seeks that land inside the buffered
-                # range are served from memory instead of the ffmpeg demuxer,
-                # so PTS gaps left by ad removal can never reset playback to
-                # the start (0:00).
+                # Buffered seeks stay in RAM, so ad-removal PTS gaps cannot reset to 0:00.
                 mpv_args+=("--demuxer-seekable-cache=yes")
                 mpv_args+=("--demuxer-max-bytes=150M")
                 mpv_args+=("--demuxer-max-back-bytes=100M")
                 mpv_args+=("--hr-seek=default")
-                # Prevent mpv from dropping frames at DISCONTINUITY splice
-                # points left by ad removal.
+                # Do not drop frames at ad splice points.
                 mpv_args+=("--hr-seek-framedrop=no")
                 mpv_args+=("--demuxer-readahead-secs=20")
-                # Local cleaned playlist: ffmpeg hls demuxer restricts segment
-                # protocols to file,crypto,data by default and refuses https
-                # segments, stalling playback every few seconds. Force hls and
-                # whitelist the segment protocols (mpv#14792).
+                # Local playlist needs hls + remote segment protocols (mpv#14792).
                 if [[ "$url" == /* ]]; then
                     mpv_args+=("--demuxer-lavf-format=hls")
                     mpv_args+=('--demuxer-lavf-o=protocol_whitelist="https,http,file,tcp,tls,crypto,data"')
@@ -1586,7 +1470,6 @@ if [[ -n "\$slug" && "\$slug" != "null" ]]; then
     fi
 fi
 
-# Kích thước khung preview động
 cols="\${FZF_PREVIEW_COLUMNS:-80}"
 wrap_w=\$(( cols - 6 ))
 [[ \$wrap_w -lt 35 ]] && wrap_w=35
@@ -1596,11 +1479,9 @@ poster_h=\$(( cols * 18 / 100 ))
 [[ \$poster_h -lt 12 ]] && poster_h=12
 [[ \$poster_h -gt 17 ]] && poster_h=17
 
-# 1. Header Thẻ Phim
 echo -e "  \033[1;36m󰟴 \${ten}\033[0m"
 [[ -n "\$origin_name" && "\$origin_name" != "null" ]] && echo -e "  \033[0;90m󰑈 \${origin_name}\033[0m"
 
-# 2. Poster Image (Căn giữa ngang chính xác trên mọi terminal)
 img_url="\$anh"
 if [[ "\$img_url" =~ ^https?://[^/]+/(https?://.*) ]]; then
     img_url="\${BASH_REMATCH[1]}"
@@ -1659,7 +1540,6 @@ if [[ -n "\$img_url" && "\$img_url" != "null" ]]; then
     fi
 fi
 
-# 3. Khối Thông Tin Chi Tiết (Tự động chia 2 cột nếu khung rộng)
 echo -e "  \033[0;90m\${div}\033[0m"
 if [[ \$cols -ge 65 ]]; then
     printf "  \033[0;33m󰃰 Năm:\033[0m %-26s \033[0;32m󱎫 Thời lượng:\033[0m %s\n" "\${nam:-N/A}" "\${time_dur:-N/A}"
@@ -1673,7 +1553,6 @@ else
     [[ -n "\$cats" && "\$cats" != "null" ]] && echo -e "  \033[0;34m󰘯 Thể loại:\033[0m \$cats"
 fi
 
-# 4. Tóm Tắt Nội Dung Phim (Trải rộng toàn bộ khung preview)
 if [[ -n "\$clean_content" && "\$clean_content" != "null" ]]; then
     echo -e "  \033[0;90m\${div}\033[0m"
     echo -e "  \033[1;33m󰧭 Nội dung tóm tắt:\033[0m"
@@ -2210,8 +2089,7 @@ favorites() {
     [[ ! -s "$FAV" ]] && { show_error "Chưa có yêu thích"; return; }
 
     local parsed_favs
-    # Old favorites lacked a poster field (4 fields). Skip them silently.
-    # Current format has 5 fields: timestamp|title|slug|year|poster.
+    # Skip old favorites without a poster; current rows have 5+ fields.
     parsed_favs=$(awk -F'|' '{
         if (NF >= 5) print
     }' "$FAV" | sort -t'|' -k1,1rn | awk '{ sub(/^[^|]*[|]/, ""); print }')
@@ -2294,7 +2172,6 @@ select_quality() {
 purge_api_cache() {
     rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8 "$CACHE"/*-dl.m3u8
     rm -f "$CACHE"/hls-proxy.py "$CACHE"/hls-proxy.log "$CACHE"/hls-proxy.*.port
-    rm -f "$CACHE"/vsmov-proxy.py "$CACHE"/vsmov-proxy.log "$CACHE"/vsmov-proxy.*.port
     rm -rf "$CACHE/desc" "$CACHE/segments"
 }
 
@@ -2423,11 +2300,7 @@ ${I_CACHE} Xóa cache|cache"
 show_banner() {
     printf '\033[H\033[2J'
     local nguon_text player_text quality_text
-    case "$SOURCE" in
-        vsmov)  nguon_text="VSMov" ;;
-        nguonc) nguon_text="NguonC" ;;
-        *)      nguon_text="PhimAPI" ;;
-    esac
+    nguon_text=$(source_name "$SOURCE")
     case "$PLAYER_DEFAULT" in
         vlc) player_text="VLC" ;;
         *)   player_text="MPV" ;;

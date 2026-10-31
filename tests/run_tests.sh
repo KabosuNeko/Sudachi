@@ -17,10 +17,7 @@ FAILED_TESTS=()
 TESTS_TMP="$(mktemp -d /tmp/sudachi-tests.XXXXXX)"
 trap 'rm -rf "$TESTS_TMP"' EXIT
 
-# ---------------------------------------------------------------------------
-# Build a sourceable library: everything in sudachi.sh up to the first
-# top-level statement (`load_settings` at the bottom of the file).
-# ---------------------------------------------------------------------------
+# Library: everything before the main loop (`load_settings`).
 build_lib() {
     local main_start
     main_start=$(grep -n '^load_settings$' "$SCRIPT" | head -1 | cut -d: -f1)
@@ -32,10 +29,7 @@ build_lib() {
     head -n "$((main_start - 1))" "$SCRIPT" > "$LIB"
 }
 
-# run_test NAME — runs the test body in a subshell with an isolated HOME.
-# Body is provided on stdin? No: we pass the function name via $1 and read the
-# body from a heredoc at the call site. Simpler: each test is a bash function
-# named test_<name>; run_test sources the lib and invokes it.
+# run_test NAME — run test_<name> in a fresh HOME.
 run_test() {
     local name="$1"
     local home="$TESTS_TMP/home-$name"
@@ -78,9 +72,6 @@ assert_contains() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 test_sanitize_field() {
     assert_eq "a b" "$(sanitize_field $'a\nb')" "newline to space" || return 1
