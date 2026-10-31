@@ -21,15 +21,19 @@ TEMP_FILES=()
 
 API_PHIMAPI="https://phimapi.com"
 API_VSMOV="https://vsmov.com/api"
+API_NGUONC="https://phim.nguonc.com/api"
 SOURCE="vsmov"
 API_BASE="$API_VSMOV"
 USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-VS_PROXY_PID=""
-VS_PROXY_URL=""
+HLS_PROXY_PID=""
+HLS_PROXY_URL=""
+NGUONC_ORIGIN=""
+NGUONC_PLAYLIST=""
 
 set_api_base() {
     case "$SOURCE" in
         phimapi) API_BASE="$API_PHIMAPI" ;;
+        nguonc)  API_BASE="$API_NGUONC" ;;
         *)       SOURCE="vsmov"; API_BASE="$API_VSMOV" ;;
     esac
 }
@@ -96,7 +100,7 @@ load_settings() {
                 ;;
             SOURCE)
                 case "$value" in
-                    phimapi|vsmov) SOURCE="$value" ;;
+                    phimapi|vsmov|nguonc) SOURCE="$value" ;;
                 esac
                 ;;
         esac
@@ -180,9 +184,9 @@ check_dependencies() {
         exit 1
     fi
 
-    # VSMov video needs the local PNG-stripping proxy.
-    if [[ "$SOURCE" == "vsmov" ]] && ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${C_Y}VSMov cần python3, tạm chuyển sang PhimAPI.${C_R}"
+    # VSMov/NguonC playback needs the local HLS proxy.
+    if [[ "$SOURCE" == "vsmov" || "$SOURCE" == "nguonc" ]] && ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${C_Y}Nguồn này cần python3, tạm chuyển sang PhimAPI.${C_R}"
         SOURCE="phimapi"
         set_api_base
     fi
@@ -190,7 +194,7 @@ check_dependencies() {
 
 
 cleanup() {
-    stop_vsmov_proxy
+    stop_hls_proxy
     for tmpfile in "${TEMP_FILES[@]}"; do
         [[ -f "$tmpfile" ]] && rm -f "$tmpfile"
     done
@@ -800,39 +804,74 @@ resolve_stream_url() {
     printf '%s' "$resolved"
 }
 
+# resolve_nguonc_embed <embed-url> -- bootstrap the NguonC player; sets
+# NGUONC_PLAYLIST and NGUONC_ORIGIN for the local proxy.
+resolve_nguonc_embed() {
+    local embed="$1" host hash body playlist turnstile format
+
+    host=$(sed -E 's|^https?://([^/]+).*|\1|' <<< "$embed")
+    hash=$(sed -n 's/.*[?&]hash=\([^&]*\).*/\1/p' <<< "$embed")
+    [[ -n "$host" && -n "$hash" ]] || return 1
+
+    body=$(curl -fsS -A "$USER_AGENT" -H "Origin: https://$host" -H "Referer: https://$host/" \
+        -H 'Content-Type: application/json' \
+        -d '{"action":"bootstrap","referrer":"https://phim.nguonc.com/","frame_origins":["https://phim.nguonc.com"],"request_grant":true,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"bootstrap_format":"json"}' \
+        "https://$host/embed.php?hash=$hash" 2>/dev/null) || return 1
+
+    turnstile=$(jq -r '.turnstileEnabled // false' <<< "$body" 2>/dev/null)
+    playlist=$(jq -r '.preissued.playlist // empty' <<< "$body" 2>/dev/null)
+    format=$(jq -r '.preissued.playlistFormat // empty' <<< "$body" 2>/dev/null)
+    [[ "$turnstile" == "true" || "$format" != "hls" || -z "$playlist" ]] && return 1
+
+    NGUONC_ORIGIN="https://$host"
+    NGUONC_PLAYLIST="$playlist"
+    return 0
+}
+
 # resolve_saved_url <slug> <ep> [stored-url] -- refresh a history link; never
 # resolve a stored URL from the other source because slugs can collide.
 resolve_saved_url() {
-    local slug="$1" ep="$2" stored="${3:-}" res url
+    local slug="$1" ep="$2" stored="${3:-}" res url expected
 
     [[ -n "$slug" && -n "$ep" ]] || return 0
     if [[ -n "$stored" ]]; then
         case "$stored" in
-            *streamvsmov*) [[ "$SOURCE" == "vsmov" ]] || return 0 ;;
-            *)             [[ "$SOURCE" == "phimapi" ]] || return 0 ;;
+            *streamvsmov*) expected="vsmov" ;;
+            *streamc.xyz*) expected="nguonc" ;;
+            *)             expected="phimapi" ;;
         esac
+        [[ "$SOURCE" == "$expected" ]] || return 0
     fi
-    res=$(call_api "/phim/$slug") || return 0
-    url=$(jq -r --arg ep "$ep" '
-        [.episodes[]?.server_data[]? | select(.name == $ep)] | .[0] |
-        if . == null then empty
-        elif (.link_m3u8 // "") != "" then .link_m3u8
-        else (.link_embed // "") end
-    ' <<< "$res" 2>/dev/null)
+
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        res=$(call_api "/film/$slug") || return 0
+        url=$(jq -r --arg ep "$ep" '
+            [.movie.episodes[]?.items[]? | select(.name == $ep)] | .[0] |
+            if . == null then empty else .embed end
+        ' <<< "$res" 2>/dev/null)
+    else
+        res=$(call_api "/phim/$slug") || return 0
+        url=$(jq -r --arg ep "$ep" '
+            [.episodes[]?.server_data[]? | select(.name == $ep)] | .[0] |
+            if . == null then empty
+            elif (.link_m3u8 // "") != "" then .link_m3u8
+            else (.link_embed // "") end
+        ' <<< "$res" 2>/dev/null)
+    fi
     printf '%s' "$url"
 }
 
-# create_vsmov_proxy_script -- cache the PNG-stripping proxy. VSMov wraps each
+# create_hls_proxy_script -- cache the PNG-stripping proxy. VSMov wraps each
 # TS segment in a PNG header, which ffmpeg refuses to read.
-create_vsmov_proxy_script() {
-    local script="$CACHE/vsmov-proxy.py" tmp
-    if [[ -s "$script" ]] && grep -q '^# vsmov-proxy v2' "$script"; then
+create_hls_proxy_script() {
+    local script="$CACHE/hls-proxy.py" tmp
+    if [[ -s "$script" ]] && grep -q '^# hls-proxy v3' "$script"; then
         return 0
     fi
-    tmp=$(mktemp "$CACHE/vsmov-proxy.XXXXXX.py") || return 1
+    tmp=$(mktemp "$CACHE/hls-proxy.XXXXXX.py") || return 1
     cat > "$tmp" <<'PY'
 #!/usr/bin/env python3
-# vsmov-proxy v2
+# hls-proxy v3
 import base64
 import sys
 import threading
@@ -846,6 +885,8 @@ CACHE = OrderedDict()
 CACHE_MAX = 12
 CACHE_LOCK = threading.Lock()
 ROOT = ""
+ORIGIN = ""
+REFERER = ""
 
 
 def fetch(url):
@@ -854,11 +895,12 @@ def fetch(url):
         if body is not None:
             CACHE.move_to_end(url)
             return body
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA,
-        "Referer": "https://v9.streamvsmov.com/",
-        "Accept": "*/*",
-    })
+    headers = {"User-Agent": UA, "Accept": "*/*"}
+    if REFERER:
+        headers["Referer"] = REFERER
+    if ORIGIN:
+        headers["Origin"] = ORIGIN
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as res:
         body = res.read()
     with CACHE_LOCK:
@@ -960,15 +1002,17 @@ def selftest():
 
 
 def main():
-    global ROOT
+    global ROOT, ORIGIN, REFERER
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         return selftest()
     if len(sys.argv) < 4:
-        print("usage: vsmov-proxy.py <port> <portfile> <playlist-url>", file=sys.stderr)
+        print("usage: hls-proxy.py <port> <portfile> <playlist-url> [origin] [referer]", file=sys.stderr)
         return 2
     port = int(sys.argv[1])
     portfile = sys.argv[2]
     ROOT = sys.argv[3]
+    ORIGIN = sys.argv[4] if len(sys.argv) > 4 else ""
+    REFERER = sys.argv[5] if len(sys.argv) > 5 else "https://v9.streamvsmov.com/"
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     with open(portfile, "w") as handle:
         handle.write(str(server.server_address[1]))
@@ -985,63 +1029,65 @@ PY
     fi
 }
 
-# start_vsmov_proxy <playlist-url> -- set VS_PROXY_URL to a local proxy playlist.
-start_vsmov_proxy() {
-    local url="$1" script portfile port i proxy_url seed attempt
+# start_hls_proxy <playlist-url> [origin] [referer] [port-key] -- set
+# HLS_PROXY_URL to a local proxy playlist. The port is derived from port-key
+# (default: the playlist URL) so mpv resume survives token changes.
+start_hls_proxy() {
+    local url="$1" origin="${2:-}" referer="${3:-https://v9.streamvsmov.com/}" port_key="${4:-$1}"
+    local script portfile port i proxy_url seed attempt
 
-    command -v python3 >/dev/null 2>&1 || { log_debug "vsmov proxy: python3 missing"; return 1; }
-    create_vsmov_proxy_script || return 1
-    stop_vsmov_proxy
-    script="$CACHE/vsmov-proxy.py"
-    portfile=$(mktemp "$CACHE/vsmov-proxy.XXXXXX.port") || return 1
+    command -v python3 >/dev/null 2>&1 || { log_debug "hls proxy: python3 missing"; return 1; }
+    create_hls_proxy_script || return 1
+    stop_hls_proxy
+    script="$CACHE/hls-proxy.py"
+    portfile=$(mktemp "$CACHE/hls-proxy.XXXXXX.port") || return 1
 
-    # Stable port keeps mpv's watch-later key (and resume) across runs.
-    seed=$(printf '%s' "$url" | cksum | cut -d' ' -f1)
+    seed=$(printf '%s' "$port_key" | cksum | cut -d' ' -f1)
     [[ "$seed" =~ ^[0-9]+$ ]] || seed=0
     port=""
     for attempt in $(seq 0 9); do
         : > "$portfile"
-        python3 "$script" "$((17000 + seed % 1000 + attempt))" "$portfile" "$url" \
-            >>"$CACHE/vsmov-proxy.log" 2>&1 &
-        VS_PROXY_PID=$!
+        python3 "$script" "$((17000 + seed % 1000 + attempt))" "$portfile" "$url" "$origin" "$referer" \
+            >>"$CACHE/hls-proxy.log" 2>&1 &
+        HLS_PROXY_PID=$!
         for i in $(seq 1 50); do
             if [[ -s "$portfile" ]]; then
                 port=$(<"$portfile")
                 break
             fi
-            kill -0 "$VS_PROXY_PID" 2>/dev/null || break
+            kill -0 "$HLS_PROXY_PID" 2>/dev/null || break
             sleep 0.1
         done
         [[ -n "$port" ]] && break
-        stop_vsmov_proxy
+        stop_hls_proxy
     done
     rm -f "$portfile"
     if [[ -z "$port" ]]; then
-        stop_vsmov_proxy
-        log_debug "vsmov proxy: no port for $url"
+        stop_hls_proxy
+        log_debug "hls proxy: no port for $url"
         return 1
     fi
 
     proxy_url="http://127.0.0.1:$port/master.m3u8"
     for i in 1 2 3 4 5; do
         if curl -fsS --max-time 10 "$proxy_url" -o /dev/null 2>/dev/null; then
-            VS_PROXY_URL="$proxy_url"
+            HLS_PROXY_URL="$proxy_url"
             return 0
         fi
         sleep 0.2
     done
-    stop_vsmov_proxy
-    log_debug "vsmov proxy: not ready for $url"
+    stop_hls_proxy
+    log_debug "hls proxy: not ready for $url"
     return 1
 }
 
-stop_vsmov_proxy() {
-    if [[ -n "$VS_PROXY_PID" ]]; then
-        kill "$VS_PROXY_PID" 2>/dev/null
-        wait "$VS_PROXY_PID" 2>/dev/null
-        VS_PROXY_PID=""
+stop_hls_proxy() {
+    if [[ -n "$HLS_PROXY_PID" ]]; then
+        kill "$HLS_PROXY_PID" 2>/dev/null
+        wait "$HLS_PROXY_PID" 2>/dev/null
+        HLS_PROXY_PID=""
     fi
-    VS_PROXY_URL=""
+    HLS_PROXY_URL=""
 }
 
 
@@ -1176,19 +1222,31 @@ download_episode() {
         return 1
     fi
 
-    local is_vsmov=0
+    local is_proxy=0
+    local proxy_playlist="" proxy_origin="" proxy_referer="" proxy_key=""
     if [[ "$url" == *"streamvsmov.com"* ]]; then
-        is_vsmov=1
-        url=$(resolve_stream_url "$url")
-        if [[ "$url" != *".m3u8"* ]]; then
+        is_proxy=1
+        proxy_key="$url"
+        proxy_playlist=$(resolve_stream_url "$url")
+        if [[ "$proxy_playlist" != *".m3u8"* ]]; then
             show_error "Không lấy được link tải"
             return 1
         fi
+    elif [[ "$url" == *"streamc.xyz"* && "$url" == *"embed.php"* ]]; then
+        is_proxy=1
+        proxy_key="$url"
+        if ! resolve_nguonc_embed "$url"; then
+            show_error "Không lấy được link NguonC"
+            return 1
+        fi
+        proxy_playlist="$NGUONC_PLAYLIST"
+        proxy_origin="$NGUONC_ORIGIN"
+        proxy_referer="$NGUONC_ORIGIN/"
     fi
 
     # PhimAPI: strip ads from the playlist; yt-dlp handles the remote clips.
     local dl_url="$url" dl_local=0 clean
-    if [[ $is_vsmov -eq 0 && "$AD_BLOCK" == "1" && "$url" == *".m3u8"* ]]; then
+    if [[ $is_proxy -eq 0 && "$AD_BLOCK" == "1" && "$url" == *".m3u8"* ]]; then
         clean=$(hls_fetch_clean "$url" dl)
         if [[ "$clean" == http* ]]; then
             dl_url="$clean"
@@ -1210,18 +1268,18 @@ download_episode() {
 
     (
         # The subshell owns its proxy; do not touch a playback proxy.
-        VS_PROXY_PID=""
-        VS_PROXY_URL=""
-        trap 'stop_vsmov_proxy' EXIT
+        HLS_PROXY_PID=""
+        HLS_PROXY_URL=""
+        trap 'stop_hls_proxy' EXIT
         local rc
-        if [[ $is_vsmov -eq 1 ]]; then
-            if ! start_vsmov_proxy "$url"; then
-                echo "Không khởi động được proxy VSMov" > "$log_file"
+        if [[ $is_proxy -eq 1 ]]; then
+            if ! start_hls_proxy "$proxy_playlist" "$proxy_origin" "$proxy_referer" "$proxy_key"; then
+                echo "Không khởi động được proxy HLS" > "$log_file"
                 rc=1
             else
-                yt-dlp "$VS_PROXY_URL" -o "$DL/$file" -N 8 > "$log_file" 2>&1
+                yt-dlp "$HLS_PROXY_URL" -o "$DL/$file" -N 8 > "$log_file" 2>&1
                 rc=$?
-                stop_vsmov_proxy
+                stop_hls_proxy
             fi
         elif [[ $dl_local -eq 1 ]]; then
             yt-dlp --enable-file-urls -N 8 "$dl_url" -o "$DL/$file" > "$log_file" 2>&1
@@ -1316,11 +1374,13 @@ play_video() {
     local url="$1" title="$2"
     shift 2
     local extra_args=("$@")
-    local is_vsmov=0
+    local is_vsmov=0 is_nguonc=0
     LAST_PLAYER_PID=""
 
     if [[ "$url" == *"streamvsmov.com"* ]]; then
         is_vsmov=1
+    elif [[ "$url" == *"streamc.xyz"* && "$url" == *"embed.php"* ]]; then
+        is_nguonc=1
     fi
     if [[ $is_vsmov -eq 1 ]]; then
         url=$(resolve_stream_url "$url")
@@ -1329,15 +1389,26 @@ play_video() {
             show_error "Không lấy được link phát"
             return 1
         fi
-        if ! start_vsmov_proxy "$url"; then
-            show_error "Không khởi động được proxy VSMov"
+        if ! start_hls_proxy "$url"; then
+            show_error "Không khởi động được proxy HLS"
             return 1
         fi
-        url="$VS_PROXY_URL"
+        url="$HLS_PROXY_URL"
+    elif [[ $is_nguonc -eq 1 ]]; then
+        if ! resolve_nguonc_embed "$url"; then
+            log_debug "play_video: could not bootstrap NguonC embed"
+            show_error "Không lấy được link NguonC"
+            return 1
+        fi
+        if ! start_hls_proxy "$NGUONC_PLAYLIST" "$NGUONC_ORIGIN" "$NGUONC_ORIGIN/" "$url"; then
+            show_error "Không khởi động được proxy HLS"
+            return 1
+        fi
+        url="$HLS_PROXY_URL"
     fi
 
-    # PhimAPI HLS: strip ads. VSMov is already clean behind the local proxy.
-    if [[ $is_vsmov -eq 0 && "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]]; then
+    # PhimAPI HLS: strip ads. VSMov/NguonC are clean behind the local proxy.
+    if [[ $is_vsmov -eq 0 && $is_nguonc -eq 0 && "$AD_BLOCK" == "1" ]] && [[ "$url" == *".m3u8"* ]]; then
         url=$(hls_fetch_clean "$url")
     fi
 
@@ -1413,6 +1484,12 @@ parse_vsmov_items() {
         "\(.name)|\(.year // "N/A")|\(.country[0].name? // "N/A")|\(.episode_current // "N/A")|\(.slug)|\(.poster_url // .thumb_url // "")"' <<< "$1" 2>/dev/null
 }
 
+parse_nguonc_items() {
+    jq -r '.items[] |
+        (if .quality then " [" + .quality + (if .language then "-" + .language else "" end) + "]" else "" end) as $tag |
+        "\(.name)|\(.year // "N/A")\($tag)|N/A|\(.current_episode // "N/A")|\(.slug)|\(.poster_url // .thumb_url // "")"' <<< "$1" 2>/dev/null
+}
+
 
 create_preview_script() {
     local script
@@ -1421,6 +1498,8 @@ create_preview_script() {
 
     local api_base="$API_BASE"
     local source_key="$SOURCE"
+    local detail_prefix="/phim/"
+    [[ "$SOURCE" == "nguonc" ]] && detail_prefix="/film/"
 
     cat > "$script" << EOF
 #!/bin/bash
@@ -1457,7 +1536,7 @@ if [[ -n "\$slug" && "\$slug" != "null" ]]; then
     if [[ -f "\$detail_cache" ]]; then
         detail_res=\$(cat "\$detail_cache")
     else
-        detail_res=\$(curl -fsS --max-time 2 "${api_base}/phim/\${slug}" 2>/dev/null)
+        detail_res=\$(curl -fsS --max-time 2 "${api_base}${detail_prefix}\${slug}" 2>/dev/null)
         [[ -n "\$detail_res" ]] && printf '%s' "\$detail_res" > "\$detail_cache"
     fi
 
@@ -1465,7 +1544,7 @@ if [[ -n "\$slug" && "\$slug" != "null" ]]; then
         origin_name=\$(jq -r '.movie.origin_name // ""' <<< "\$detail_res" 2>/dev/null)
         time_dur=\$(jq -r '.movie.time // ""' <<< "\$detail_res" 2>/dev/null)
         cats=\$(jq -r '[.movie.category[]?.name] | join(", ")' <<< "\$detail_res" 2>/dev/null)
-        raw_content=\$(jq -r '.movie.content // ""' <<< "\$detail_res" 2>/dev/null)
+        raw_content=\$(jq -r '.movie.content // .movie.description // ""' <<< "\$detail_res" 2>/dev/null)
         clean_content=\$(printf '%s' "\$raw_content" | sed -E 's/<[^>]+>/ /g' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     fi
 fi
@@ -1606,13 +1685,22 @@ watch_episode() {
 
     show_loading
 
-    local res ds_tap server_idx
+    local res ds_tap server_idx episodes_path=".episodes"
 
-    res=$(call_api "/phim/$slug")
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        episodes_path=".movie.episodes"
+        res=$(call_api "/film/$slug")
+    else
+        res=$(call_api "/phim/$slug")
+    fi
     [[ -z "$res" ]] && { show_error "Không lấy được thông tin"; return; }
 
-    server_idx=$(pick_server "$res" '.episodes') || return
-    ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | select(((.link_m3u8 // "") != "") or ((.link_embed // "") != "")) | "\(.name)|\(if (.link_m3u8 // "") != "" then .link_m3u8 else (.link_embed // "") end)"' <<< "$res" 2>/dev/null)
+    server_idx=$(pick_server "$res" "$episodes_path") || return
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        ds_tap=$(jq -r --argjson idx "$server_idx" '.movie.episodes[$idx].items[] | "\(.name)|\(.embed)"' <<< "$res" 2>/dev/null)
+    else
+        ds_tap=$(jq -r --argjson idx "$server_idx" '.episodes[$idx].server_data[] | select(((.link_m3u8 // "") != "") or ((.link_embed // "") != "")) | "\(.name)|\(if (.link_m3u8 // "") != "" then .link_m3u8 else (.link_embed // "") end)"' <<< "$res" 2>/dev/null)
+    fi
 
     [[ -z "$ds_tap" ]] && { show_error "Không có tập phim"; return; }
 
@@ -1667,7 +1755,7 @@ watch_episode() {
 
                 play_video "$url" "$tieu_de"
                 [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
-                stop_vsmov_proxy
+                stop_hls_proxy
                 ;;
             tab)
                 download_episode "$url" "$tieu_de"
@@ -1765,7 +1853,20 @@ show_paginated_list() {
 
 
 fetch_list() {
-    local loai="$1" p="$2" extra="$3" res cdn
+    local loai="$1" p="$2" extra="${3:-}" res cdn path
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        case "$loai" in
+            phim-moi)  path="/films/phim-moi-cap-nhat" ;;
+            phim-bo)   path="/films/danh-sach/phim-bo" ;;
+            phim-le)   path="/films/danh-sach/phim-le" ;;
+            hoat-hinh) path="/films/the-loai/hoat-hinh" ;;
+            *)         path="/films/$loai" ;;
+        esac
+        res=$(call_api "${path}?page=${p}")
+        [[ -z "$res" ]] && return
+        parse_nguonc_items "$res"
+        return
+    fi
     if [[ "$SOURCE" == "vsmov" ]]; then
         res=$(call_api "/danh-sach/${loai}?page=${p}")
         [[ -z "$res" ]] && return
@@ -1786,7 +1887,19 @@ create_search_script() {
     local script
     script=$(mktemp "$CACHE/search.XXXXXX.sh") || return 1
     register_temp "$script"
-    if [[ "$SOURCE" == "vsmov" ]]; then
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        cat > "$script" << EOF
+#!/bin/bash
+$(declare -f format_movie_items)
+$(declare -f parse_nguonc_items)
+
+[[ -z "\$1" || \${#1} -lt 2 ]] && exit 0
+q=\$(jq -rn --arg q "\$1" '\$q|@uri' 2>/dev/null) || exit 0
+res=\$(curl -fsS --max-time 5 "${API_BASE}/films/search?keyword=\${q}" 2>/dev/null)
+[[ -z "\$res" ]] && exit 0
+parse_nguonc_items "\$res" | format_movie_items
+EOF
+    elif [[ "$SOURCE" == "vsmov" ]]; then
         cat > "$script" << EOF
 #!/bin/bash
 $(declare -f format_movie_items)
@@ -1848,6 +1961,12 @@ search() {
 new_releases() {
     show_loading
     local res
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        res=$(call_api "/films/phim-moi-cap-nhat?page=1")
+        [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
+        show_list "$(parse_nguonc_items "$res")" "PHIM MỚI"
+        return
+    fi
     if [[ "$SOURCE" == "vsmov" ]]; then
         res=$(call_api "/danh-sach/phim-moi?page=1")
         [[ -z "$res" ]] && { show_error "Lỗi kết nối"; return; }
@@ -1861,7 +1980,7 @@ new_releases() {
 
 browse() {
     local menu
-    if [[ "$SOURCE" == "vsmov" ]]; then
+    if [[ "$SOURCE" == "nguonc" || "$SOURCE" == "vsmov" ]]; then
         menu="󰎁  Phim Mới|phim-moi
 󰎁  Phim Bộ|phim-bo
 󰎁  Phim Lẻ|phim-le
@@ -1882,7 +2001,9 @@ browse() {
     local ten_raw="${chon%%|*}"
     local ten="${ten_raw#*. }"
 
-    if [[ "$SOURCE" == "vsmov" ]]; then
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        fetch_browse() { fetch_list "$loai" "$1"; }
+    elif [[ "$SOURCE" == "vsmov" ]]; then
         fetch_browse() {
             local res
             if [[ "$loai" == "hoat-hinh" ]]; then
@@ -1969,6 +2090,12 @@ anime_mode() {
     fetch_anime() {
         local p="$1"
         local res cdn
+        if [[ "$SOURCE" == "nguonc" ]]; then
+            res=$(call_api "/films/the-loai/hoat-hinh?page=${p}")
+            [[ -z "$res" ]] && return
+            parse_nguonc_items "$res"
+            return
+        fi
         if [[ "$SOURCE" == "vsmov" ]]; then
             res=$(call_api "/the-loai/hoat-hinh?page=${p}")
             [[ -z "$res" ]] && return
@@ -1985,6 +2112,10 @@ anime_mode() {
 }
 
 advanced_filter() {
+    if [[ "$SOURCE" == "nguonc" ]]; then
+        show_error "NguonC chưa hỗ trợ lọc"
+        return
+    fi
     local menu="  Thể loại|theloai
   Quốc gia|quocgia
   Năm|nam"
@@ -2022,7 +2153,7 @@ history() {
     [[ -n "$fresh" ]] && url="$fresh"
     play_video "$url" "$title"
     [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
-    stop_vsmov_proxy
+    stop_hls_proxy
 }
 
 
@@ -2113,6 +2244,7 @@ select_quality() {
 
 purge_api_cache() {
     rm -f "$CACHE"/*.json "$CACHE"/*-clean.m3u8 "$CACHE"/*-dl.m3u8
+    rm -f "$CACHE"/hls-proxy.py "$CACHE"/hls-proxy.log "$CACHE"/hls-proxy.*.port
     rm -f "$CACHE"/vsmov-proxy.py "$CACHE"/vsmov-proxy.log "$CACHE"/vsmov-proxy.*.port
     rm -rf "$CACHE/desc" "$CACHE/segments"
 }
@@ -2144,12 +2276,14 @@ toggle_ad_block() {
 }
 
 select_source() {
-    local phimapi_mark="" vsmov_mark=""
+    local phimapi_mark="" vsmov_mark="" nguonc_mark=""
     [[ "$SOURCE" == "phimapi" ]] && phimapi_mark=" \033[1;32m(đang dùng)\033[0m"
     [[ "$SOURCE" == "vsmov" ]] && vsmov_mark=" \033[1;32m(đang dùng)\033[0m"
+    [[ "$SOURCE" == "nguonc" ]] && nguonc_mark=" \033[1;32m(đang dùng)\033[0m"
 
     local menu="PhimAPI${phimapi_mark}|phimapi
-VSMov${vsmov_mark}|vsmov"
+VSMov${vsmov_mark}|vsmov
+NguonC${nguonc_mark}|nguonc"
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
@@ -2158,8 +2292,8 @@ VSMov${vsmov_mark}|vsmov"
     [[ -z "$chon" ]] && return
 
     local selected="${chon#*|}"
-    if [[ "$selected" == "vsmov" ]] && ! command -v python3 >/dev/null 2>&1; then
-        show_error "VSMov cần python3"
+    if [[ "$selected" == "vsmov" || "$selected" == "nguonc" ]] && ! command -v python3 >/dev/null 2>&1; then
+        show_error "Nguồn này cần python3"
         return
     fi
     SOURCE="$selected"
@@ -2171,8 +2305,9 @@ settings() {
     local ad_status source_status
     [[ "$AD_BLOCK" == "1" ]] && ad_status="\033[1;32m[BẬT]\033[0m" || ad_status="\033[1;31m[TẮT]\033[0m"
     case "$SOURCE" in
-        vsmov) source_status="VSMov" ;;
-        *)     source_status="PhimAPI" ;;
+        vsmov)  source_status="VSMov" ;;
+        nguonc) source_status="NguonC" ;;
+        *)      source_status="PhimAPI" ;;
     esac
 
     local menu="${I_SOURCE} Nguồn phim: ${source_status}|source
@@ -2204,8 +2339,9 @@ show_banner() {
     printf '\033[H\033[2J'
     local nguon_text player_text quality_text
     case "$SOURCE" in
-        vsmov) nguon_text="VSMov" ;;
-        *)     nguon_text="PhimAPI" ;;
+        vsmov)  nguon_text="VSMov" ;;
+        nguonc) nguon_text="NguonC" ;;
+        *)      nguon_text="PhimAPI" ;;
     esac
     case "$PLAYER_DEFAULT" in
         vlc) player_text="VLC" ;;
@@ -2295,7 +2431,7 @@ handle_cli_args() {
                     check_player
                     play_video "$url" "$title"
                     [[ -n "$LAST_PLAYER_PID" ]] && wait "$LAST_PLAYER_PID" 2>/dev/null
-                    stop_vsmov_proxy
+                    stop_hls_proxy
                     exit 0
                 fi
             fi

@@ -14,7 +14,7 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 
 ## Điểm chính
 
-- **Nguồn phim**: VSMov (mặc định) và PhimAPI — đổi trong Cài đặt → Nguồn phim
+- **Nguồn phim**: VSMov (mặc định), NguonC và PhimAPI — đổi trong Cài đặt → Nguồn phim
 - **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
 - **Tải tập**: `yt-dlp` đa luồng (aria2c hoặc HLS native), thông báo desktop khi xong
 - **Poster trong terminal**: preview bằng `chafa` (Kitty/Sixel)
@@ -33,7 +33,7 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 | `yt-dlp` + `aria2c` | Tải tập đa luồng |
 | `notify-send` | Thông báo khi tải xong |
 | `ffmpeg` + `ffprobe` | Ghép mốc thời gian clip tài trợ để tua mượt (thiếu vẫn phát bình thường) |
-| `python3` | Proxy bóc header PNG cho luồng VSMov (chỉ cần khi dùng VSMov) |
+| `python3` | Proxy HLS cục bộ cho VSMov/NguonC (chỉ cần khi dùng hai nguồn này) |
 
 ### Cài theo distro
 
@@ -94,7 +94,7 @@ Tự tạo tại `~/.config/sudachi/`:
 
 | File | Nội dung |
 |---|---|
-| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=phimapi\|vsmov`) |
+| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=phimapi\|vsmov\|nguonc`) |
 | `history.log` · `favorites.log` · `progress.log` | Lịch sử xem, yêu thích, tập đang xem dở |
 | `cache/` | Cache API, poster, playlist đã lọc và clip đã ghép (`Cài đặt → Xóa cache` để dọn) |
 
@@ -103,13 +103,14 @@ Tự tạo tại `~/.config/sudachi/`:
 Đổi trong **Cài đặt → Nguồn phim**:
 
 - **VSMov** (mặc định): `vsmov.com/api`, 1080p, không có ad giữa tập hay watermark `99z2`. Segment TS bị bọc trong header PNG; Sudachi chạy proxy Python cục bộ để bóc header (cần `python3`).
+- **NguonC**: `phim.nguonc.com/api`, nhiều phim bộ/anime. Sudachi bootstrap player trực tiếp, lấy playlist HLS qua proxy cục bộ; không cần Turnstile, không qua K20.
 - **PhimAPI**: `phimapi.com`, nguồn cũ. Phần phát đã cắt khối ad `/v8/`; clip `convertv` vẫn còn chữ tài trợ vì là cảnh phim thật.
 
-OPhim đã chết, NguonC bị Turnstile ở player. Cả hai nguồn đều là bên thứ ba và có thể chết bất cứ lúc nào.
+OPhim đã chết. Các nguồn đều là bên thứ ba và có thể chết bất cứ lúc nào.
 
 ## Chặn quảng cáo HLS
 
-Với nguồn PhimAPI, mọi playlist `.m3u8` được lọc trước khi phát — tua tới/lui không còn nhảy về đầu. VSMov không chèn quảng cáo nên không cần bước này; proxy chỉ bóc header PNG.
+Với nguồn PhimAPI, mọi playlist `.m3u8` được lọc trước khi phát — tua tới/lui không còn nhảy về đầu. VSMov/NguonC không chèn quảng cáo nên không cần bước này; proxy chỉ bóc header PNG và gắn header CDN.
 
 - Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`. Khối segment ngoài thư mục phim ngay sau `#EXT-X-KEY:METHOD=NONE` cũng bị coi là quảng cáo, kể cả khi CDN đổi tên đường dẫn; segment trong đúng thư mục phim không bao giờ bị cắt
 - **Chất lượng** (Cài đặt → Chất lượng) chọn đúng variant HLS: mặc định bản cao nhất, chọn 720p sẽ lấy variant ≤ 720p
@@ -117,7 +118,7 @@ Với nguồn PhimAPI, mọi playlist `.m3u8` được lọc trước khi phát 
 - Phát bằng VLC: thêm `--no-input-fast-seek` (tua chính xác) và `--network-caching=3000` (đệm segment từ xa); tùy chọn chất lượng giữ nguyên
 - Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache (tối đa 6 giờ); CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
 - Tải phim (Tab) với PhimAPI dùng playlist đã cắt ad (`cache/<hash>-dl.m3u8`), nên file tải về không còn khối quảng cáo giữa tập; clip `convertv` vẫn giữ nguyên vì là nội dung phim
-- Với VSMov, tải phim chạy qua cùng proxy với lúc phát nên file tải về là stream sạch
+- Với VSMov/NguonC, tải phim chạy qua cùng proxy với lúc phát nên file tải về là stream sạch
 
 ## Credits
 

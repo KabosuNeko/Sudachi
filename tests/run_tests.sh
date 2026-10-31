@@ -144,6 +144,17 @@ test_parse_vsmov_items() {
         "$out" "vsmov item mapping" || return 1
 }
 
+test_parse_nguonc_items() {
+    local json='{"items":[
+        {"name":"Phim A","year":"2026","quality":"HD","language":"Vietsub","current_episode":"Tập 1","slug":"phim-a","poster_url":"https://img/a.jpg"},
+        {"name":"Phim B","slug":"phim-b","thumb_url":"https://img/b.jpg"}
+    ]}'
+    local out
+    out=$(parse_nguonc_items "$json")
+    assert_eq $'Phim A|2026 [HD-Vietsub]|N/A|Tập 1|phim-a|https://img/a.jpg\nPhim B|N/A|N/A|N/A|phim-b|https://img/b.jpg' \
+        "$out" "nguonc item mapping" || return 1
+}
+
 test_parse_vsmov_player_page() {
     local page='const playerOptions = {
         enableSignedUrl: false,
@@ -182,11 +193,34 @@ EOF
         "$(resolve_stream_url "https://other.example/x")" "other sources passthrough" || return 1
 }
 
+test_resolve_nguonc_embed() {
+    local bin="$TEST_HOME/nguonc-resolve"
+    mkdir -p "$bin"
+    cat > "$bin/curl" <<'EOF'
+#!/bin/bash
+cat <<'JSON'
+{"turnstileEnabled":false,"preissued":{"playlist":"https://embed1.streamc.xyz/token-playlist","playlistFormat":"hls"}}
+JSON
+EOF
+    chmod +x "$bin/curl"
+
+    PATH="$bin:$PATH" resolve_nguonc_embed "https://embed1.streamc.xyz/embed.php?hash=abc" || return 1
+    assert_eq "https://embed1.streamc.xyz/token-playlist" "$NGUONC_PLAYLIST" "preissued playlist" || return 1
+    assert_eq "https://embed1.streamc.xyz" "$NGUONC_ORIGIN" "origin for proxy headers" || return 1
+
+    cat > "$bin/curl" <<'EOF'
+#!/bin/bash
+echo '{"turnstileEnabled":true}'
+EOF
+    chmod +x "$bin/curl"
+    ! PATH="$bin:$PATH" resolve_nguonc_embed "https://embed1.streamc.xyz/embed.php?hash=abc" || return 1
+}
+
 test_vsmov_proxy_selftest() {
     command -v python3 >/dev/null 2>&1 || return 0
-    create_vsmov_proxy_script || return 1
+    create_hls_proxy_script || return 1
     local out
-    out=$(python3 "$CACHE/vsmov-proxy.py" --selftest 2>&1) || { echo "$out" >&2; return 1; }
+    out=$(python3 "$CACHE/hls-proxy.py" --selftest 2>&1) || { echo "$out" >&2; return 1; }
     assert_eq "ok" "$out" "PNG header stripped to TS" || return 1
 }
 
@@ -489,7 +523,9 @@ test_resolve_saved_url() {
   {"name":"1","link_m3u8":"https://cdn/ep1.m3u8"},
   {"name":"2","link_embed":"https://v9.streamvsmov.com/video/ep2"},
   {"name":"3","link_m3u8":""}
-]}]}
+]}],"movie":{"episodes":[{"items":[
+  {"name":"1","embed":"https://embed1.streamc.xyz/embed.php?hash=x"}
+]}]}}
 JSON
     }
     assert_eq "https://cdn/ep1.m3u8" "$(resolve_saved_url "slug" "1")" "phimapi link" || return 1
@@ -498,6 +534,10 @@ JSON
     assert_eq "" "$(resolve_saved_url "" "1")" "missing slug" || return 1
     SOURCE=vsmov
     assert_eq "" "$(resolve_saved_url "slug" "1" "https://cdn.example/movie.m3u8")" "phimapi URL not resolved on vsmov" || return 1
+    SOURCE=nguonc
+    assert_eq "https://embed1.streamc.xyz/embed.php?hash=x" \
+        "$(resolve_saved_url "slug" "1" "https://embed1.streamc.xyz/embed.php?hash=old")" \
+        "nguonc embed refreshed" || return 1
 }
 
 test_record_progress() {
@@ -549,6 +589,11 @@ test_load_settings() {
     assert_eq "720" "$QUALITY" "quality" || return 1
     assert_eq "phimapi" "$SOURCE" "source" || return 1
 
+    printf 'SOURCE=nguonc\n' > "$CONFIG_FILE"
+    SOURCE=vsmov
+    load_settings
+    assert_eq "nguonc" "$SOURCE" "nguonc source" || return 1
+
     # Invalid QUALITY ignored: with fresh state (QUALITY=""), an invalid value
     # must not set QUALITY.
     printf 'QUALITY=999\n' > "$CONFIG_FILE"
@@ -581,8 +626,8 @@ test_clear_cache_removes_all() {
     : > "$CACHE/api.json"
     : > "$CACHE/foo-clean.m3u8"
     : > "$CACHE/foo-dl.m3u8"
-    : > "$CACHE/vsmov-proxy.py"
-    : > "$CACHE/vsmov-proxy.log"
+    : > "$CACHE/hls-proxy.py"
+    : > "$CACHE/hls-proxy.log"
     : > "$CACHE/desc/poster.img"
     : > "$CACHE/downloads/tasks.log"
     : > "$CACHE/segments/abc-r.ts"
@@ -592,8 +637,8 @@ test_clear_cache_removes_all() {
     [[ ! -f "$CACHE/api.json" ]] || { echo "json cache left" >&2; return 1; }
     [[ ! -f "$CACHE/foo-clean.m3u8" ]] || { echo "clean playlist left" >&2; return 1; }
     [[ ! -f "$CACHE/foo-dl.m3u8" ]] || { echo "download playlist left" >&2; return 1; }
-    [[ ! -f "$CACHE/vsmov-proxy.py" ]] || { echo "proxy script left" >&2; return 1; }
-    [[ ! -f "$CACHE/vsmov-proxy.log" ]] || { echo "proxy log left" >&2; return 1; }
+    [[ ! -f "$CACHE/hls-proxy.py" ]] || { echo "proxy script left" >&2; return 1; }
+    [[ ! -f "$CACHE/hls-proxy.log" ]] || { echo "proxy log left" >&2; return 1; }
     [[ ! -e "$CACHE/desc" ]] || { echo "desc dir left" >&2; return 1; }
     [[ ! -e "$CACHE/segments" ]] || { echo "segments dir left" >&2; return 1; }
     [[ -f "$CACHE/downloads/tasks.log" ]] || { echo "downloads must survive" >&2; return 1; }
@@ -667,12 +712,12 @@ EOF
     chmod +x "$bin/yt-dlp"
 
     resolve_stream_url() { printf '%s' "https://v9.streamvsmov.com/stream/x/master.m3u8"; }
-    start_vsmov_proxy() {
+    start_hls_proxy() {
         # shellcheck disable=SC2034  # read by download_episode
-        VS_PROXY_URL="http://127.0.0.1:1/master.m3u8"
+        HLS_PROXY_URL="http://127.0.0.1:1/master.m3u8"
         return 0
     }
-    stop_vsmov_proxy() { :; }
+    stop_hls_proxy() { :; }
     sleep() { :; }
 
     AD_BLOCK=1
@@ -682,7 +727,7 @@ EOF
     recorded=$(cat "$argsfile")
     assert_contains "$recorded" "http://127.0.0.1:1/master.m3u8" "yt-dlp receives the proxy URL" || return 1
     assert_contains "$recorded" "-N" "native HLS concurrency" || return 1
-    unset -f sleep resolve_stream_url start_vsmov_proxy stop_vsmov_proxy
+    unset -f sleep resolve_stream_url start_hls_proxy stop_hls_proxy
 }
 
 test_view_downloads_status() {
@@ -1372,8 +1417,10 @@ TESTS=(
     parse_v1_items
     parse_phimapi_v3
     parse_vsmov_items
+    parse_nguonc_items
     parse_vsmov_player_page
     resolve_stream_url
+    resolve_nguonc_embed
     vsmov_proxy_selftest
     hash_url
     hls_absolutize_url
