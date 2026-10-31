@@ -47,7 +47,7 @@ Auto-created at `~/.config/sudachi/`:
 
 ## API sources
 
-Three sources. `SOURCE` is the primary source (browse/new/anime); `SEARCH_SOURCES`
+Three sources. `SOURCE` is the primary/browse source (`Nguồn duyệt`: new/browse/anime); `SEARCH_SOURCES`
 is the comma-separated list searched together (Cài Đặt → Nguồn tìm kiếm).
 `set_api_base` maps `SOURCE` to `API_BASE`; every `call_api` endpoint is relative to it.
 

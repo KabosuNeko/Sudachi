@@ -14,7 +14,7 @@ Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim
 
 ## Điểm chính
 
-- **Nguồn phim**: VSMov (mặc định), NguonC và PhimAPI — đổi trong Cài đặt → Nguồn phim
+- **Nguồn duyệt**: VSMov (mặc định), NguonC và PhimAPI — đổi trong Cài đặt → Nguồn duyệt
 - **Tìm nhiều nguồn**: chọn các nguồn trong Cài đặt → Nguồn tìm kiếm; kết quả gộp và gắn nhãn nguồn
 - **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
 - **Tải tập**: `yt-dlp` đa luồng (aria2c hoặc HLS native), thông báo desktop khi xong
@@ -101,7 +101,7 @@ Tự tạo tại `~/.config/sudachi/`:
 
 ## Nguồn phim
 
-Đổi trong **Cài đặt → Nguồn phim**:
+Đổi nguồn duyệt trong **Cài đặt → Nguồn duyệt**:
 
 - **VSMov** (mặc định): `vsmov.com/api`, 1080p, không có ad giữa tập hay watermark `99z2`. Segment TS bị bọc trong header PNG; Sudachi chạy proxy Python cục bộ để bóc header (cần `python3`).
 - **NguonC**: `phim.nguonc.com/api`, nhiều phim bộ/anime. Sudachi bootstrap player trực tiếp, lấy playlist HLS qua proxy cục bộ; không cần Turnstile, không qua K20.

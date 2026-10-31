@@ -2369,8 +2369,8 @@ NguonC${nguonc_mark}|nguonc"
 
     local chon
     chon=$(echo -e "$menu" | add_menu_numbers | fzf "${FZF_OPTS[@]}" \
-        --delimiter='|' --with-nth=1 --prompt="Nguồn phim > " --height=40% \
-        --header="Nguồn phim · Esc quay lại ")
+        --delimiter='|' --with-nth=1 --prompt="Nguồn duyệt > " --height=40% \
+        --header="Nguồn duyệt · Esc quay lại ")
     [[ -z "$chon" ]] && return
 
     local selected="${chon#*|}"
@@ -2393,7 +2393,7 @@ settings() {
         search_label+="${search_label:+, }$(source_name "$item")"
     done
 
-    local menu="${I_SOURCE} Nguồn phim: ${source_status}|source
+    local menu="${I_SOURCE} Nguồn duyệt: ${source_status}|source
 ${I_SOURCE} Nguồn tìm kiếm: ${search_label}|searchsources
 ${I_PLAYER} Trình phát|player
 ${I_QUA} Chất lượng|quality
@@ -2444,7 +2444,7 @@ show_banner() {
     echo -e "${C_G} ⢀⣀⣠⣤⣴⣶⡶⢿⣿⣿⣿⠿⠿⠿⠿⠟⠛⢋⣁⣤⡴⠂⣠⡆${C_R}"
     echo -e "${C_G} ⠈⠙⠻⢿⣿⣿⣿⣶⣤⣤⣤⣤⣤⣴⣶⣶⣿⣿⣿⡿⠋⣠⣾⣿${C_R}     ${C_Y}Sudachi Player${C_R}"
     echo -e "${C_G} ⢀⣴⣤⣄⡉⠛⠻⠿⠿⣿⣿⣿⣿⡿⠿⠟⠋⣁⣤⣾⣿⣿⣿${C_R}      ${C_C}Git: KabosuNeko${C_R}"
-    echo -e "${C_G} ⣠⣾⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣶⣾⣿⣿⣿⣿⣿⣿⣿⡇${C_R}     ${C_M}Nguồn: ${nguon_text}${C_R}"
+    echo -e "${C_G} ⣠⣾⣿⣿⣿⣿⣶⣶⣤⣤⣤⣤⣤⣤⣶⣾⣿⣿⣿⣿⣿⣿⣿⡇${C_R}     ${C_M}Duyệt: ${nguon_text}${C_R}"
     echo -e "${C_G} ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇${C_R}    ${C_C}Player: ${player_text} | ${quality_text}${C_R}"
     echo -e "${C_G} ⢰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠁${C_R}"
     echo -e "${C_G}  ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠇⢸⡟⢸⡟${C_R}"
