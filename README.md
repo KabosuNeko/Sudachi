@@ -10,42 +10,42 @@
   <a href="#c%C3%A0i-%C4%91%E1%BA%B7t"><img src="https://img.shields.io/badge/shell-bash-89e051.svg" alt="Bash" /></a>
 </p>
 
-Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim, chọn tập, phát bằng `mpv`/`vlc` — kèm lọc quảng cáo và tải tập về máy.
+Trình phim/TV/anime phụ đề Việt chạy thẳng trong terminal: tìm phim, chọn tập, phát bằng `mpv`/`vlc`, tải tập về máy. Nguồn phim lấy từ addon K20 (đã lọc quảng cáo sẵn).
 
 ## Điểm chính
 
-- **Nguồn duyệt**: VSMov (mặc định), NguonC và PhimAPI — đổi trong Cài đặt → Nguồn duyệt
-- **Tìm nhiều nguồn**: chọn các nguồn trong Cài đặt → Nguồn tìm kiếm; kết quả gộp và gắn nhãn nguồn
-- **Lọc quảng cáo HLS**: cắt khối ad giữa tập trước khi phát, ghép lại mốc thời gian clip tài trợ để tua không nhảy
-- **Tải tập**: `yt-dlp` đa luồng (aria2c hoặc HLS native), thông báo desktop khi xong
+- **Nguồn K20**: KKPhim, VSMov, NguonC (tìm kiếm gộp) và AnimeVietsub; quảng cáo đã được K20 lọc trên server
+- **Duyệt và lọc**: mọi danh mục của K20, lọc theo danh mục, thể loại, quốc gia, năm
+- **Tải tập**: `yt-dlp` tải song song nhiều đoạn, thông báo desktop khi xong
 - **Poster trong terminal**: preview bằng `chafa` (Kitty/Sixel)
-- **Lịch sử, yêu thích, xem tiếp**: mở lại đúng tập và đúng chỗ đang xem dở
+- **Lịch sử, yêu thích, xem tiếp**: mở lại đúng tập; `mpv` nhớ chỗ đang xem dở
 - **CLI flags**: tìm nhanh, xem tiếp, phim mới, anime, tiến độ tải
 
 ## Yêu cầu
 
-**Bắt buộc:** `fzf` + `jq` + `curl`, kèm `mpv` (khuyên dùng) hoặc `vlc`.
+Chỉ hỗ trợ Linux. **Bắt buộc:** `fzf` (>= 0.60) + `jq` + `curl`, kèm `mpv` (khuyên dùng) hoặc `vlc`. Trên Arch/CachyOS, VLC cần thêm `vlc-plugin-dvb` và `vlc-plugin-ffmpeg` mới phát được phim (thiếu thì Sudachi báo và tạm dùng mpv).
 
 **Khuyến nghị thêm:**
 
 | Gói | Dùng cho |
 |---|---|
-| `chafa` | Poster preview trong terminal |
-| `yt-dlp` + `aria2c` | Tải tập đa luồng |
+| `chafa` (+ `imagemagick`) | Poster preview trong terminal |
+| `yt-dlp` | Tải tập |
 | `notify-send` | Thông báo khi tải xong |
-| `ffmpeg` + `ffprobe` | Ghép mốc thời gian clip tài trợ để tua mượt (thiếu vẫn phát bình thường) |
-| `python3` | Proxy HLS cục bộ cho VSMov/NguonC (chỉ cần khi dùng hai nguồn này) |
+| `python3` | Chỉ cần để phát/tải phim nguồn NguonC (proxy cục bộ) |
 
 ### Cài theo distro
 
 **Arch**
 ```bash
-sudo pacman -S fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg python
+sudo pacman -S fzf jq curl mpv yt-dlp chafa imagemagick libnotify
 ```
 
 **Debian/Ubuntu**
 ```bash
-sudo apt install fzf jq curl mpv aria2 libnotify-bin chafa ffmpeg python3
+sudo apt install jq curl mpv libnotify-bin chafa imagemagick
+# fzf từ apt quá cũ (Debian 12: 0.38, Ubuntu 24.04: 0.44) — cài bản mới từ
+# https://github.com/junegunn/fzf/releases
 # yt-dlp từ apt thường bản cũ — cài binary thủ công:
 sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
@@ -53,7 +53,7 @@ sudo chmod a+rx /usr/local/bin/yt-dlp
 
 **Fedora**
 ```bash
-sudo dnf install fzf jq curl mpv yt-dlp chafa aria2 libnotify ffmpeg python3
+sudo dnf install fzf jq curl mpv yt-dlp chafa ImageMagick libnotify
 ```
 
 ## Cài đặt
@@ -80,6 +80,15 @@ sudachi -d             # Tiến độ và danh sách tải phim
 sudachi -h             # Trợ giúp
 ```
 
+### Menu
+
+- **Tìm phim**: gõ để tìm trong KKPhim, VSMov, NguonC và danh sách K20 Anime
+- **Xem tiếp**: phim đã xem gần đây kèm tập và thời gian; Enter mở danh sách tập ở đúng tập kế, Ctrl+D xóa
+- **Khám phá**: phim mới, anime mới và mọi danh mục của K20; trong danh sách bấm **Ctrl+G** để lọc theo thể loại, quốc gia, năm
+- **Yêu thích**, **Tải về**, **Cài đặt**
+
+Esc luôn quay lại màn trước; Esc ở menu chính để thoát.
+
 ### Phím tắt (chọn tập)
 
 | Phím | Chức năng |
@@ -95,33 +104,20 @@ Tự tạo tại `~/.config/sudachi/`:
 
 | File | Nội dung |
 |---|---|
-| `config` | Trình phát (`mpv`/`vlc`), chất lượng, chặn quảng cáo, nguồn phim (`SOURCE=...`), nguồn tìm kiếm (`SEARCH_SOURCES=vsmov,nguonc,phimapi`) |
+| `config` | Trình phát (`PLAYER_DEFAULT=mpv` hoặc `vlc`) |
 | `history.log` · `favorites.log` · `progress.log` | Lịch sử xem, yêu thích, tập đang xem dở |
-| `cache/` | Cache API, poster, playlist đã lọc và clip đã ghép (`Cài đặt → Xóa cache` để dọn) |
+| `~/.cache/sudachi/` | Cache API, poster và log tải (`Cài đặt → Xóa cache` để dọn, kể cả các lượt tải đã xong) |
 
 ## Nguồn phim
 
-Đổi nguồn duyệt trong **Cài đặt → Nguồn duyệt**:
+Toàn bộ phim lấy từ hai addon Stremio của K20, gọi thẳng qua HTTP:
 
-- **VSMov** (mặc định): `vsmov.com/api`, 1080p, không có ad giữa tập hay watermark `99z2`. Segment TS bị bọc trong header PNG; Sudachi chạy proxy Python cục bộ để bóc header (cần `python3`).
-- **NguonC**: `phim.nguonc.com/api`, nhiều phim bộ/anime. Sudachi bootstrap player trực tiếp, lấy playlist HLS qua proxy cục bộ; không cần Turnstile, không qua K20.
-- **PhimAPI**: `phimapi.com`, nguồn cũ. Phần phát đã cắt khối ad `/v8/`; clip `convertv` vẫn còn chữ tài trợ vì là cảnh phim thật.
+- **K20** (`sc.k-20.xyz`): KKPhim, VSMov, NguonC, STP, CLBPX. Tìm kiếm hỏi cùng lúc KKPhim, VSMov và NguonC; cùng một phim ở nhiều kho chỉ hiện một dòng kèm danh sách kho, ví dụ `[kkphim, nguonc]`, và khi mở sẽ hỏi chọn nguồn.
+- **K20 Anime** (`anime.k-20.xyz`): AnimeVietsub, dùng cho mục Anime và Duyệt. Addon này không tự tìm kiếm được, nên Sudachi lưu sẵn danh sách khoảng 250 phim nó đang hiển thị (làm mới mỗi giờ) và tìm trong đó; kết quả có nhãn `[animevietsub]`. Ảnh bìa, thể loại và tóm tắt (tiếng Anh) lấy từ Kitsu vì K20 Anime không có tóm tắt và CDN ảnh của AnimeVietsub hay bị nhà mạng chặn. Nhiều phim cũ K20 Anime không còn link phát.
 
-**Tìm nhiều nguồn:** mở Cài đặt → Nguồn tìm kiếm, Tab chọn các nguồn muốn tìm. Kết quả gộp chung và có nhãn `[VSMov]`, `[NguonC]`, `[PhimAPI]`; chọn kết quả nào thì phát đúng nguồn đó.
+K20 lọc quảng cáo trên server. Riêng KKPhim, K20 cắt luôn các đoạn `convertv` (cảnh phim thật có chữ tài trợ đè lên, khoảng 25 giây mỗi tập), nên Sudachi tự dựng lại playlist KKPhim: chỉ bỏ quảng cáo, giữ đủ cảnh. Với mpv, Sudachi ghép các đoạn bằng EDL (file dòng thời gian của mpv) nên đồng hồ chạy liền và tua đúng cả trong đoạn `convertv`; đổi lại, mở tập KKPhim chậm hơn vài giây. VLC không đọc được EDL nên tua ngay trong đoạn `convertv` có thể nhảy sai. Không cần ffmpeg hay python. Khi một tập có nhiều bản (Vietsub, Thuyết minh), Sudachi hỏi chọn bản nào.
 
-OPhim đã chết. Các nguồn đều là bên thứ ba và có thể chết bất cứ lúc nào.
-
-## Chặn quảng cáo HLS
-
-Với nguồn PhimAPI, mọi playlist `.m3u8` được lọc trước khi phát — tua tới/lui không còn nhảy về đầu. VSMov/NguonC không chèn quảng cáo nên không cần bước này; proxy chỉ bóc header PNG và gắn header CDN.
-
-- Playlist HLS được tải, cắt các segment khớp `HLS_AD_PATTERNS` (`ads*/`, `promo*/`, `/v*/<hash>/segment_`) rồi cache tại `cache/<hash>-clean.m3u8`. Khối segment ngoài thư mục phim ngay sau `#EXT-X-KEY:METHOD=NONE` cũng bị coi là quảng cáo, kể cả khi CDN đổi tên đường dẫn; segment trong đúng thư mục phim không bao giờ bị cắt
-- **Chất lượng** (Cài đặt → Chất lượng) chọn đúng variant HLS: mặc định bản cao nhất, chọn 720p sẽ lấy variant ≤ 720p
-- Clip `convertv*` là cảnh phim thật kèm text tài trợ nhưng bị CDN đặt lại mốc thời gian; `ffmpeg` ghép chúng về đúng dòng thời gian phim nên tua qua đoạn này đứng yên. Các clip liền nhau thành từng cụm, mỗi cụm neo vào segment phim ngay trước nó — playlist nhiều cụm vẫn ghép đúng. Thiếu `ffmpeg`/`ffprobe` thì giữ nguyên dấu `DISCONTINUITY` — vẫn phát bình thường
-- Phát bằng VLC: thêm `--no-input-fast-seek` (tua chính xác) và `--network-caching=3000` (đệm segment từ xa); tùy chọn chất lượng giữ nguyên
-- Nếu lần tải lại playlist gặp lỗi, chương trình dùng bản đã lọc trong cache (tối đa 6 giờ); CDN đổi layout ad sẽ được ghi cảnh báo vào `cache/debug.log`
-- Tải phim (Tab) với PhimAPI dùng playlist đã cắt ad (`cache/<hash>-dl.m3u8`), nên file tải về không còn khối quảng cáo giữa tập; clip `convertv` vẫn giữ nguyên vì là nội dung phim
-- Với VSMov/NguonC, tải phim chạy qua cùng proxy với lúc phát nên file tải về là stream sạch
+Các nguồn đều là bên thứ ba và có thể đổi hoặc chết bất cứ lúc nào. Lịch sử và yêu thích từ phiên bản cũ (PhimAPI, VSMov, NguonC tự làm) có thể không mở được nữa; xóa bằng Ctrl+D trong Yêu thích.
 
 ## Credits
 

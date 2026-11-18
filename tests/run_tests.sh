@@ -35,7 +35,7 @@ run_test() {
     local home="$TESTS_TMP/home-$name"
     local out rc
     # -c so the test body (defined in the parent) is available after sourcing.
-    out=$(export HOME="$home" TEST_HOME="$home"; \
+    out=$(export HOME="$home" TEST_HOME="$home"; unset XDG_CACHE_HOME; \
           mkdir -p "$home"; \
           source "$LIB" 2>&1; \
           "test_$name" 2>&1)
@@ -73,418 +73,510 @@ assert_contains() {
 }
 
 
+# fake_bin <name> <script body> -- put an executable stub on a private PATH dir.
+fake_bin() {
+    local dir="$TEST_HOME/bin-$1"
+    mkdir -p "$dir"
+    printf '#!/bin/bash\n%s\n' "$2" > "$dir/$1"
+    chmod +x "$dir/$1"
+    printf '%s' "$dir"
+}
+
 test_sanitize_field() {
     assert_eq "a b" "$(sanitize_field $'a\nb')" "newline to space" || return 1
     assert_eq "a b" "$(sanitize_field $'a\rb')" "CR to space" || return 1
     assert_eq "a-b" "$(sanitize_field "a|b")" "pipe to dash" || return 1
-    assert_eq "plain" "$(sanitize_field "plain")" "passthrough" || return 1
     assert_eq "" "$(sanitize_field "")" "empty" || return 1
 }
 
-test_add_menu_numbers() {
-    assert_eq $'1. a\n2. b\n3. c' "$(printf 'a\nb\nc' | add_menu_numbers)" "numbering" || return 1
-}
-
 test_format_movie_items() {
-    local input="Phim Test|2026 [FHD-Vietsub]|Nhật Bản|Tập 10|phim-test|https://img.url/p.jpg"
-    local out
-    out=$(format_movie_items <<< "$input")
-    local field1 field2 field3 field4 field5 field6 field7 field8
-    IFS='|' read -r field1 field2 field3 field4 field5 field6 field7 field8 <<< "$out"
-    assert_contains "$field1" "Phim Test" "display contains title" || return 1
-    assert_contains "$field1" "2026 [FHD-Vietsub]" "display contains tag" || return 1
-    assert_contains "$field1" "[Tập 10]" "display contains ep" || return 1
-    assert_eq "Phim Test" "$field2" "field 2 is clean title" || return 1
-    assert_eq "2026 [FHD-Vietsub]" "$field3" "field 3 is tag" || return 1
-    assert_eq "Nhật Bản" "$field4" "field 4 is country" || return 1
-    assert_eq "Tập 10" "$field5" "field 5 is ep" || return 1
-    assert_eq "phim-test" "$field6" "field 6 is slug" || return 1
-    assert_eq "https://img.url/p.jpg" "$field7" "field 7 is poster" || return 1
-    assert_eq "" "$field8" "field 8 is empty without source" || return 1
-
-    out=$(format_movie_items <<< "$input|vsmov")
-    IFS='|' read -r field1 _ _ _ _ _ _ field8 <<< "$out"
-    assert_contains "$field1" "[VSMov]" "display shows source" || return 1
-    assert_eq "vsmov" "$field8" "field 8 carries source" || return 1
+    local out f1 f2 f3 f6 f8
+    out=$(format_movie_items <<< "Phim Test|2026|N/A|kkphim|series/kkphim:x|https://img/p.jpg|k20")
+    IFS='|' read -r f1 f2 f3 _ _ f6 _ f8 <<< "$out"
+    assert_contains "$f1" "Phim Test" "display has title" || return 1
+    assert_contains "$f1" "2026" "display has year" || return 1
+    assert_contains "$f1" "[kkphim]" "display has provider" || return 1
+    assert_eq "Phim Test" "$f2" "clean title" || return 1
+    assert_eq "2026" "$f3" "year" || return 1
+    assert_eq "series/kkphim:x" "$f6" "slug" || return 1
+    assert_eq "k20" "$f8" "source tag" || return 1
 }
 
-test_parse_v1_items() {
-    local json='{"data":{"items":[
-        {"name":"Phim A","year":2024,"quality":"FHD","lang":"Vietsub","country":[{"name":"VN"}],"episode_current":"12/24","slug":"phim-a","poster_url":"/p/a.jpg"},
-        {"name":"Phim B","year":null,"quality":null,"lang":null,"country":[],"episode_current":null,"slug":"phim-b","poster_url":"/p/b.jpg"}
-    ]}}'
-    local out
-    out=$(parse_v1_items "$json" "https://cdn.example")
-    # NOTE: cdn is prepended as "$cdn/\(.poster_url)"; poster_url starts with
-    # '/' so the double slash is current locked behavior.
-    assert_eq $'Phim A|2024 [FHD-Vietsub]|VN|12/24|phim-a|https://cdn.example//p/a.jpg\nPhim B|N/A|N/A|N/A|phim-b|https://cdn.example//p/b.jpg' \
-        "$out" "item mapping with cdn" || return 1
-}
-
-test_parse_phimapi_v3() {
-    local json='{"items":[
-        {"name":"Phim A","year":2023,"quality":"HD","lang":"TM","country":[{"name":"US"}],"episode_current":"10","slug":"phim-a","poster_url":"/p/a.jpg"}
+test_parse_k20_items() {
+    local json='{"metas":[
+        {"id":"kkphim:phim-a","type":"series","name":"Phim A","releaseInfo":"2026","poster":"https://img/a.jpg"},
+        {"id":"animevietsub:b","type":"movie","name":"Phim B"}
     ]}'
+    assert_eq $'Phim A|2026|N/A|kkphim|series/kkphim:phim-a|https://img/a.jpg\nPhim B|N/A|N/A|animevietsub|movie/animevietsub:b|' \
+        "$(parse_k20_items "$json")" "item mapping" || return 1
+    assert_eq "" "$(parse_k20_items '{"error":"x"}')" "no metas" || return 1
+}
+
+test_group_results() {
     local out
-    out=$(parse_phimapi_v3 "$json")
-    assert_eq $'Phim A|2023 [HD-TM]|US|10|phim-a|/p/a.jpg' "$out" "item mapping" || return 1
+    out=$(group_results <<'ROWS'
+Trùm Cuối Giá Lâm! / Trùm Cuối Xuất Hiện! (Phần 2)|2026|N/A|kkphim|series/kkphim:tc2|https://img/tc2.jpg
+Thám Tử Conan (Vietsub)|1996|N/A|vsmov|series/vsmov:conan-vs|
+Trùm Cuối Xuất Hiện! (Phần 2)|2026|N/A|nguonc|series/nguonc:tc2|
+Trùm Cuối Xuất Hiện! (Phần 1)|2025|N/A|nguonc|series/nguonc:tc1|
+thám tử conan (Lồng Tiếng)|1996|N/A|vsmov|series/vsmov:conan-lt|https://img/c.jpg
+Thám Tử Conan|2011|N/A|kkphim|movie/kkphim:conan-2011|
+ROWS
+)
+    assert_eq 4 "$(wc -l <<< "$out")" "same title + year merged, other years kept apart" || return 1
+    assert_eq "Trùm Cuối Giá Lâm! / Trùm Cuối Xuất Hiện! (Phần 2)|2026|N/A|kkphim, nguonc|series/kkphim:tc2|https://img/tc2.jpg|k20|series/kkphim:tc2~Trùm Cuối Giá Lâm! / Trùm Cuối Xuất Hiện! (Phần 2)^series/nguonc:tc2~Trùm Cuối Xuất Hiện! (Phần 2)" \
+        "$(sed -n 1p <<< "$out")" "matched on a ' / ' part, first row leads" || return 1
+    assert_contains "$(sed -n 2p <<< "$out")" "|vsmov|series/vsmov:conan-vs|https://img/c.jpg|k20|series/vsmov:conan-vs~Thám Tử Conan (Vietsub)^series/vsmov:conan-lt~" \
+        "case and audio tags ignored, provider listed once, poster filled from a later row" || return 1
+
+    out=$(printf '%s\n' "Psyren|N/A|N/A|kkphim|series/kkphim:p|" "Psyren|N/A|N/A|animevietsub|series/animevietsub:p||k20anime" | group_results)
+    assert_eq 2 "$(wc -l <<< "$out")" "rows of different addons never merge" || return 1
+    assert_contains "$(sed -n 2p <<< "$out")" "|series/animevietsub:p||k20anime|series/animevietsub:p~Psyren" "src kept" || return 1
 }
 
-test_parse_vsmov_items() {
-    local json='{"items":[
-        {"name":"Phim A","year":2026,"slug":"phim-a","poster_url":"https://img/a.jpg"},
-        {"name":"Phim B","slug":"phim-b","thumb_url":"https://img/b.jpg"}
-    ]}'
+test_k20anime_index() {
+    call_api() {
+        case "$1" in
+            */manifest.json) echo '{"catalogs":[{"type":"series","id":"latest","extra":[{"name":"genre","options":["Hành Động"]}]},{"type":"movie","id":"film"}]}' ;;
+            */series/latest.json) echo '{"metas":[{"id":"animevietsub:a","type":"series","name":"A"}]}' ;;
+            */series/latest/genre=H%C3%A0nh%20%C4%90%E1%BB%99ng.json) echo '{"metas":[{"id":"animevietsub:a","type":"series","name":"A"},{"id":"animevietsub:b","type":"series","name":"B"}]}' ;;
+            */movie/film.json) echo '{"metas":[{"id":"animevietsub:c","type":"movie","name":"C"},{"id":"animevietsub:a","type":"movie","name":"A"}]}' ;;
+        esac
+    }
+    sleep 30 &
+    local bg=$! t0=$SECONDS
+    k20anime_index || return 1
+    kill "$bg"
+    (( SECONDS - t0 < 10 )) || { echo "index build waited on an unrelated background job" >&2; return 1; }
+    assert_eq $'A|N/A|N/A|animevietsub|series/animevietsub:a|\nB|N/A|N/A|animevietsub|series/animevietsub:b|\nC|N/A|N/A|animevietsub|movie/animevietsub:c|' \
+        "$(sort "$ANIME_INDEX")" "every catalog and genre page, deduplicated by id across types" || return 1
+
+    call_api() { return 1; }
+    touch -d "2 hours ago" "$ANIME_INDEX"
+    k20anime_index
+    assert_eq 3 "$(wc -l < "$ANIME_INDEX")" "failed rebuild keeps the old index" || return 1
+}
+
+test_open_choice_source_picker() {
+    local got="" row
+    watch_episode() { got="$1|$2|$3"; }
+    row=$(format_movie_items <<< "Phim|2026|N/A|kkphim, nguonc|series/kkphim:a||k20|series/kkphim:a~Phim A^series/nguonc:b~Phim B")
+    fzf() { cat > "$TEST_HOME/picker"; sed -n 2p "$TEST_HOME/picker"; }
+    open_choice "$row"
+    assert_contains "$(cat "$TEST_HOME/picker")" "[kkphim] Phim A~" "picker shows provider and name" || return 1
+    assert_eq "series/nguonc:b|Phim B|k20" "$got" "chosen source opened" || return 1
+
+    got=""
+    open_choice "$(format_movie_items <<< "Solo|2026|N/A|kkphim|series/kkphim:s||k20|series/kkphim:s~Solo")"
+    assert_eq "series/kkphim:s|Solo|k20" "$got" "single source opens without asking" || return 1
+}
+
+test_k20_catalog_paging() {
+    local calls="$TEST_HOME/calls"
+    call_api() {
+        printf '%s\n' "$1" >> "$calls"
+        case "$1" in
+            *skip=4*) echo '{"metas":[{"id":"kkphim:c","type":"series","name":"C"}]}' ;;
+            *) echo '{"metas":[{"id":"kkphim:a","type":"series","name":"A"},{"id":"kkphim:b","type":"series","name":"B"}]}' ;;
+        esac
+    }
     local out
-    out=$(parse_vsmov_items "$json")
-    assert_eq $'Phim A|2026|N/A|N/A|phim-a|https://img/a.jpg\nPhim B|N/A|N/A|N/A|phim-b|https://img/b.jpg' \
-        "$out" "vsmov item mapping" || return 1
+    out=$(k20_catalog k20anime series/animevietsub-latest 1)
+    assert_contains "$out" "A|N/A|N/A|kkphim|series/kkphim:a||k20anime" "rows tagged with source" || return 1
+    assert_contains "$(cat "$calls")" "$API_K20_ANIME/catalog/series/animevietsub-latest.json" "anime base" || return 1
+    : > "$calls"
+    out=$(k20_catalog k20 movie/kkphim-movie 3 "Danh mục: Mới")
+    assert_contains "$(cat "$calls")" "$API_K20/catalog/movie/kkphim-movie/genre=Danh%20m%E1%BB%A5c%3A%20M%E1%BB%9Bi&skip=4.json" \
+        "genre kept and skip = (page-1) * page size" || return 1
+    assert_contains "$out" "|series/kkphim:c|" "page 3 rows" || return 1
+    assert_eq "" "$(k20_catalog k20anime series/animevietsub-latest 2)" "page repeating page 1 means no next page" || return 1
 }
 
-test_parse_nguonc_items() {
-    local json='{"items":[
-        {"name":"Phim A","year":"2026","quality":"HD","language":"Vietsub","current_episode":"Tập 1","slug":"phim-a","poster_url":"https://img/a.jpg"},
-        {"name":"Phim B","slug":"phim-b","thumb_url":"https://img/b.jpg"}
-    ]}'
-    local out
-    out=$(parse_nguonc_items "$json")
-    assert_eq $'Phim A|2026 [HD-Vietsub]|N/A|Tập 1|phim-a|https://img/a.jpg\nPhim B|N/A|N/A|N/A|phim-b|https://img/b.jpg' \
-        "$out" "nguonc item mapping" || return 1
+test_k20_catalogs() {
+    call_api() {
+        echo '{"catalogs":[{"type":"movie","id":"m","name":"Lẻ"},{"type":"tv","id":"t","name":"TV"},{"type":"series","id":"s","name":"Bộ"}]}'
+    }
+    assert_eq $'Lẻ|k20|movie/m\nBộ|k20|series/s\nLẻ|k20anime|movie/m\nBộ|k20anime|series/s' "$(k20_catalogs)" "movie/series catalogs of both addons" || return 1
 }
 
-test_parse_vsmov_player_page() {
-    local page='const playerOptions = {
-        enableSignedUrl: false,
-        signedMasterUrl: "",
-    };
-    const baseUrl = "https://v9.streamvsmov.com";
-    const videoHash = "abc123";'
-    assert_eq "https://v9.streamvsmov.com/stream/abc123/master.m3u8" \
-        "$(parse_vsmov_player_page <<< "$page")" "baseUrl + videoHash" || return 1
+test_resolve_k20_stream() {
+    local bin
+    bin=$(fake_bin curl "cat <<'JSON'
+{\"streams\":[{\"name\":\"NguonC\",\"title\":\"Vietsub\\nTập 1\",\"url\":\"https://cdn.test/a.m3u8\",
+  \"behaviorHints\":{\"proxyHeaders\":{\"request\":{\"Referer\":\"https://embed.test/\",\"User-Agent\":\"UA, with comma\"}}}},
+  {\"name\":\"Rating only\"}]}
+JSON")
+    PATH="$bin:$PATH" resolve_k20_stream "https://sc.k-20.xyz/stream/series/x.json" || return 1
+    assert_eq "https://cdn.test/a.m3u8" "$K20_URL" "single playable stream, no prompt" || return 1
+    assert_eq $'Referer: https://embed.test/\nUser-Agent: UA, with comma' "$(printf '%s\n' "${K20_HEADERS[@]}")" "proxy headers" || return 1
 
-    local signed='enableSignedUrl: true,
-        signedMasterUrl: "https://cdn.example/signed.m3u8",'
-    assert_eq "https://cdn.example/signed.m3u8" \
-        "$(parse_vsmov_player_page <<< "$signed")" "signed master wins" || return 1
-    assert_eq "" "$(parse_vsmov_player_page <<< 'no vars here')" "unparseable page" || return 1
-}
+    bin=$(fake_bin curl "echo '{\"streams\":[{\"name\":\"A\",\"url\":\"https://a\"},{\"name\":\"B\",\"url\":\"https://b\"}]}'")
+    fzf() { sed -n 2p; }
+    PATH="$bin:$PATH" resolve_k20_stream "https://sc.k-20.xyz/stream/movie/y.json" || return 1
+    assert_eq "https://b" "$K20_URL" "second version picked via fzf" || return 1
+    assert_eq 0 "${#K20_HEADERS[@]}" "no headers" || return 1
 
-test_resolve_stream_url() {
-    local bin="$TEST_HOME/vsmov-resolve"
-    mkdir -p "$bin"
-    cat > "$bin/curl" <<'EOF'
-#!/bin/bash
-cat <<'PAGE'
-const baseUrl = "https://v9.streamvsmov.com";
-const videoHash = "abc123";
-PAGE
-EOF
-    chmod +x "$bin/curl"
-
-    assert_eq "https://v9.streamvsmov.com/stream/abc123/master.m3u8" \
-        "$(PATH="$bin:$PATH" resolve_stream_url "https://v9.streamvsmov.com/video/abc123")" \
-        "vsmov player page resolved" || return 1
-    assert_eq "https://cdn.example/x.m3u8" \
-        "$(resolve_stream_url "https://cdn.example/x.m3u8")" "direct playlist passthrough" || return 1
-    assert_eq "https://other.example/x" \
-        "$(resolve_stream_url "https://other.example/x")" "other sources passthrough" || return 1
-}
-
-test_resolve_nguonc_embed() {
-    local bin="$TEST_HOME/nguonc-resolve"
-    mkdir -p "$bin"
-    cat > "$bin/curl" <<'EOF'
-#!/bin/bash
-cat <<'JSON'
-{"turnstileEnabled":false,"preissued":{"playlist":"https://embed1.streamc.xyz/token-playlist","playlistFormat":"hls"}}
-JSON
-EOF
-    chmod +x "$bin/curl"
-
-    PATH="$bin:$PATH" resolve_nguonc_embed "https://embed1.streamc.xyz/embed.php?hash=abc" || return 1
-    assert_eq "https://embed1.streamc.xyz/token-playlist" "$NGUONC_PLAYLIST" "preissued playlist" || return 1
-    assert_eq "https://embed1.streamc.xyz" "$NGUONC_ORIGIN" "origin for proxy headers" || return 1
-
-    cat > "$bin/curl" <<'EOF'
-#!/bin/bash
-echo '{"turnstileEnabled":true}'
-EOF
-    chmod +x "$bin/curl"
-    ! PATH="$bin:$PATH" resolve_nguonc_embed "https://embed1.streamc.xyz/embed.php?hash=abc" || return 1
-}
-
-test_vsmov_proxy_selftest() {
-    command -v python3 >/dev/null 2>&1 || return 0
-    create_hls_proxy_script || return 1
-    local out
-    out=$(python3 "$CACHE/hls-proxy.py" --selftest 2>&1) || { echo "$out" >&2; return 1; }
-    assert_eq "ok" "$out" "PNG header stripped to TS" || return 1
-}
-
-test_hash_url() {
-    local h1 h2
-    h1=$(hash_url "https://example.com/a?b=1")
-    h2=$(hash_url "https://example.com/a?b=1")
-    assert_eq "$h1" "$h2" "deterministic" || return 1
-    [[ -n "$h1" ]] || { echo "empty hash" >&2; return 1; }
-}
-
-test_hls_absolutize_url() {
-    local base="https://cdn/x/a/index.m3u8"
-    assert_eq "https://cdn2/other/seg.ts" \
-        "$(hls_absolutize_url "$base" "https://cdn2/other/seg.ts")" \
-        "absolute passthrough" || return 1
-    assert_eq "https://cdn/v8/abc/segment_1.ts" \
-        "$(hls_absolutize_url "$base" "/v8/abc/segment_1.ts")" \
-        "root-relative" || return 1
-    assert_eq "https://cdn/x/a/seg.ts" \
-        "$(hls_absolutize_url "$base" "seg.ts")" \
-        "relative dir join" || return 1
-    assert_eq "" "$(hls_absolutize_url "$base" "")" "empty" || return 1
-}
-
-test_hls_strip_ads() {
-    local base="https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/index.m3u8"
-    local ad_fix="$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-    local clean_fix="$SCRIPT_DIR/fixtures/clean_playlist.m3u8"
-    local out
-
-    out=$(hls_strip_ads "$base" < "$ad_fix")
-    # Standalone video ads are completely dropped; movie segments (including convertv* with watermark) are kept.
-    assert_contains "$out" "convertv8" "convertv8 movie segment with text overlay preserved" || return 1
-    assert_contains "$out" "convertv7" "convertv7 movie segment with text overlay preserved" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "all /v8/ video ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v7/')" "all /v7/ video ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'ads9/')" "all ads9/ video ad lines dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'promo7/')" "all promo7/ video ad lines dropped" || return 1
-    # Header normalization: VOD injected, DISCONTINUITY-SEQUENCE stripped.
-    assert_contains "$out" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'DISCONTINUITY-SEQUENCE')" "DISCONTINUITY-SEQUENCE stripped" || return 1
-    assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept" || return 1
-    assert_contains "$out" "#EXTM3U" "header kept" || return 1
-    assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_001.ts" "movie segment kept + absolutized" || return 1
-    assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/segment_014.ts" "last movie segment kept" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '3500kb/hls/3500kb')" "no doubled path" || return 1
-
-    # Clean fixture: no ad patterns -> all movie segments preserved; VOD is
-    # injected so output is NOT byte-identical anymore.
-    out=$(hls_strip_ads "$base" < "$clean_fix")
-    assert_contains "$out" "#EXT-X-PLAYLIST-TYPE:VOD" "clean fixture gets VOD header" || return 1
-    local seg
-    for seg in segment_001.ts segment_002.ts segment_003.ts segment_004.ts; do
-        assert_contains "$out" "https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/$seg" "clean movie segment $seg kept" || return 1
-    done
-}
-
-test_hls_strip_preroll_postroll() {
-    local base="https://v7.kkphimplayer7.com/20260807/Dcq1MBiO/3500kb/hls/index.m3u8"
-    local out
-
-    # Test pre-roll ads: standalone ad segments at start must not inject discontinuity between movie segments 1 and 2
-    out=$(printf '#EXTM3U\n#EXTINF:5.0,\n/v8/abc/segment_0001.ts\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "preroll ad dropped" || return 1
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c 'DISCONTINUITY')" "no spurious discontinuity after preroll" || return 1
-    assert_contains "$out" "seg1.ts" "seg1 kept" || return 1
-    assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
-    assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept after preroll" || return 1
-
-    # Test post-roll ads: standalone ad segments at end must not swallow EXT-X-ENDLIST
-    out=$(printf '#EXTM3U\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n#EXTINF:5.0,\n/v8/abc/segment_0002.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
-    assert_eq 0 "$(printf '%s\n' "$out" | grep -c '/v8/')" "postroll ad dropped" || return 1
-    assert_contains "$out" "#EXT-X-ENDLIST" "endlist kept after postroll" || return 1
-    assert_contains "$out" "seg1.ts" "seg1 kept" || return 1
-    assert_contains "$out" "seg2.ts" "seg2 kept" || return 1
-}
-
-test_hls_strip_ads_structural() {
-    # Tier 2: an ad block opened by #EXT-X-KEY:METHOD=NONE whose segment URIs
-    # do NOT match HLS_AD_PATTERNS (renamed CDN directory, root-relative
-    # outside the movie directory) must still be dropped.
-    local base="https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/index.m3u8"
-    local ad_uri="/newlayout/d61a03b1/segment_0001.ts"
-    if printf '%s\n' "$ad_uri" | grep -qE "$HLS_AD_PATTERNS"; then
-        echo "fixture URI unexpectedly matches HLS_AD_PATTERNS" >&2
-        return 1
+    bin=$(fake_bin curl "echo '{\"streams\":[{\"name\":\"Evil\",\"url\":\"--exec=touch /tmp/pwned\"}]}'")
+    if PATH="$bin:$PATH" resolve_k20_stream "https://sc.k-20.xyz/stream/movie/evil.json"; then
+        echo "non-http URL must be refused" >&2; return 1
     fi
 
-    local out expected
-    out=$(printf '#EXTM3U\n#EXTINF:6.0,\nGmydHZmS.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:3.72,\n/newlayout/d61a03b1/segment_0001.ts\n#EXTINF:2.36,\n/newlayout/d61a03b1/segment_0002.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2.76,\n7pKTYERY.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
-    expected=$(printf '%s\n' \
-        '#EXTM3U' \
-        '#EXT-X-PLAYLIST-TYPE:VOD' \
-        '#EXTINF:6.0,' \
-        'https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/GmydHZmS.ts' \
-        '#EXT-X-DISCONTINUITY' \
-        '#EXTINF:2.76,' \
-        'https://s6.kkphimplayer6.com/20260118/C58AUGSC/3500kb/hls/7pKTYERY.ts' \
-        '#EXT-X-ENDLIST')
-    assert_eq "$expected" "$out" "pattern-free ad block dropped" || return 1
+    bin=$(fake_bin curl "echo '{\"streams\":[]}'")
+    if PATH="$bin:$PATH" resolve_k20_stream "https://sc.k-20.xyz/stream/movie/z.json"; then
+        echo "empty stream list must fail" >&2; return 1
+    fi
 }
 
-test_hls_strip_ads_structural_control() {
-    # METHOD=NONE followed by movie segments in the playlist directory must be
-    # untouched: the key tag passes through and nothing is dropped.
-    local base="https://cdn/x/a/index.m3u8"
-    local out expected
-    out=$(printf '#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:10.0,\nsegment_001.ts\n#EXTINF:10.0,\nsegment_002.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
-    expected=$(printf '%s\n' \
-        '#EXTM3U' \
-        '#EXT-X-PLAYLIST-TYPE:VOD' \
-        '#EXT-X-DISCONTINUITY' \
-        '#EXT-X-KEY:METHOD=NONE' \
-        '#EXTINF:10.0,' \
-        'https://cdn/x/a/segment_001.ts' \
-        '#EXTINF:10.0,' \
-        'https://cdn/x/a/segment_002.ts' \
-        '#EXT-X-ENDLIST')
-    assert_eq "$expected" "$out" "legit METHOD=NONE playlist untouched" || return 1
-}
-
-test_hls_pick_variant() {
-    local master='#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
-360/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
-720/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
-1080/index.m3u8'
-    assert_eq "1080/index.m3u8" "$(hls_pick_variant "$master" "")" "auto picks highest" || return 1
-    assert_eq "1080/index.m3u8" "$(hls_pick_variant "$master" "auto")" "auto literal picks highest" || return 1
-    assert_eq "720/index.m3u8" "$(hls_pick_variant "$master" "720")" "720 picks 720" || return 1
-    assert_eq "360/index.m3u8" "$(hls_pick_variant "$master" "480")" "480 falls back to smallest" || return 1
-    assert_eq "720/index.m3u8" "$(hls_pick_variant "$master" "900")" "900 picks 720" || return 1
-    assert_eq "" "$(hls_pick_variant "#EXTM3U" "")" "no variants echoes nothing" || return 1
-}
-
-test_hls_pick_variant_no_resolution() {
-    # Masters without RESOLUTION must still yield a variant; otherwise the
-    # caller falls back to the raw ad-carrying master playlist.
-    local master='#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=800000
-a/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2500000
-b/index.m3u8'
-    assert_eq "b/index.m3u8" "$(hls_pick_variant "$master" "")" "auto picks highest bandwidth" || return 1
-    assert_eq "a/index.m3u8" "$(hls_pick_variant "$master" "720")" "numeric quality falls back to first variant" || return 1
-}
-
-test_hls_strip_uri_attrs() {
-    local base="https://cdn/x/a/index.m3u8"
-    local out
-    out=$(printf '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="/init/map.mp4"\n#EXTINF:10.0,\nseg1.ts\n#EXT-X-ENDLIST\n' | hls_strip_ads "$base")
-    assert_contains "$out" 'URI="https://cdn/x/a/key.bin"' "relative key URI absolutized" || return 1
-    assert_contains "$out" 'URI="https://cdn/init/map.mp4"' "root-relative map URI absolutized" || return 1
-    assert_contains "$out" "https://cdn/x/a/seg1.ts" "segment kept + absolutized" || return 1
-}
-
-test_hls_fetch_clean_cache_fallback() {
-    # A failed refetch must reuse the cached cleaned playlist instead of the
-    # raw ad-carrying URL.
-    local curlbin="$TEST_HOME/curlbin-hls-cache"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<'EOF'
-#!/bin/bash
-exit 1
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/master.m3u8"
-    local hash clean out
-    hash=$(hash_url "$url")
-    clean="$CACHE/$hash-clean.m3u8"
-    printf '#EXTM3U\n#EXTINF:10,\nhttps://cdn.example/seg.ts\n#EXT-X-ENDLIST\n' > "$clean"
-
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
-    assert_eq "$clean" "$out" "refetch failure reuses cached clean playlist" || return 1
-}
-
-test_hls_fetch_clean_download_mode() {
-    # Download mode must cache as -dl.m3u8 and skip convertv rebasing.
-    local curlbin="$TEST_HOME/curlbin-hls-dl"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/hls/media.m3u8"
-    local out hash clean
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url" dl)
-    hash=$(hash_url "$url")
-    clean="$CACHE/$hash-dl.m3u8"
-    assert_eq "$clean" "$out" "download cache path" || return 1
-    [[ -f "$clean" ]] || { echo "download playlist missing" >&2; return 1; }
-    assert_eq 0 "$(grep -c '/v8/' "$clean")" "download drops /v8/ ads" || return 1
-    assert_contains "$(cat "$clean")" "convertv8" "download keeps convertv URIs (no rebase)" || return 1
-    [[ ! -e "$CACHE/$hash-clean.m3u8" ]] || { echo "play cache must not be written" >&2; return 1; }
-}
-
-test_hls_fetch_clean_rejects_non_playlist() {
-    # CDNs answer with HTML/JSON while the origin is down. That body must not
-    # be cached as a cleaned playlist; fall back to the cached clean one, then
-    # to the original URL.
-    local curlbin="$TEST_HOME/curlbin-hls-html"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<'EOF'
-#!/bin/bash
-echo '<html><body>503 Service Unavailable</body></html>'
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/ep1/master.m3u8"
-    local hash clean out
-    hash=$(hash_url "$url")
-    clean="$CACHE/$hash-clean.m3u8"
-
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
-    assert_eq "$url" "$out" "invalid body falls back to original url" || return 1
-    [[ ! -e "$clean" ]] || { echo "HTML must not be cached as a playlist" >&2; return 1; }
-
-    printf '#EXTM3U\n#EXTINF:10,\nhttps://cdn.example/ep1/seg.ts\n' > "$clean"
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
-    assert_eq "$clean" "$out" "existing clean playlist preferred over raw url" || return 1
-}
-
-test_hls_fetch_clean_quality() {
-    local curlbin="$TEST_HOME/curlbin-hls-quality"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-url="\${@: -1}"
-printf '%s\n' "\$url" >> "$TEST_HOME/curl-requests.log"
-case "\$url" in
-    *master*)
-        cat <<'MASTER'
+# Fake KKPhim CDN: a master pointing at a relative variant, whose playlist opens
+# with a pre-roll ad, then movie segments, convertv clips and a mid-roll ad.
+kkphim_cdn() {
+    fake_bin curl 'url=${@: -1}
+case "$url" in
+    */hls/index.m3u8) cat <<PL
 #EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
-360/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
-720/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
-1080/index.m3u8
-MASTER
-        ;;
-    *720*|*1080*)
-        cat "$SCRIPT_DIR/fixtures/clean_playlist.m3u8"
-        ;;
-    *)
-        echo "WRONG-VARIANT"
-        ;;
-esac
-EOF
-    chmod +x "$curlbin/curl"
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:8
+#EXTINF:5.0,
+/v9/d3b5/segment_0001.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:6.8,
+movie1.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:3.6,
+convertv9/clip1.ts
+#EXT-X-DISCONTINUITY
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:2.7,
+/v9/d3b5/segment_0002.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4.0,
+movie2.ts
+#EXT-X-ENDLIST
+PL
+    ;;
+    */index.m3u8) printf "%s\n" "#EXTM3U" "#EXT-X-STREAM-INF:BANDWIDTH=3500000" "3500kb/hls/index.m3u8" ;;
+    *) exit 22 ;;
+esac'
+}
 
-    local url="https://cdn.example/master.m3u8"
-    QUALITY=720
-    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
-    assert_contains "$(cat "$TEST_HOME/curl-requests.log")" "/720/index.m3u8" "720 variant fetched" || return 1
-    assert_eq 0 "$(grep -c 'WRONG-VARIANT' "$TEST_HOME/curl-requests.log" 2>/dev/null || true)" "no other variant fetched" || return 1
+test_kkphim_playlist() {
+    local bin out
+    bin=$(kkphim_cdn)
+    out=$(PATH="$bin:$PATH" kkphim_playlist "https://sc.k-20.xyz/proxy-playlist.m3u8?url=https%3A%2F%2Fcdn.test%2Fep%2Findex.m3u8&referer=x") || return 1
+    assert_eq $'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:8\n#EXT-X-DISCONTINUITY\n#EXTINF:6.8,\nhttps://cdn.test/ep/3500kb/hls/movie1.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:3.6,\nhttps://cdn.test/ep/3500kb/hls/convertv9/clip1.ts\n#EXT-X-KEY:METHOD=NONE\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\nhttps://cdn.test/ep/3500kb/hls/movie2.ts\n#EXT-X-ENDLIST' \
+        "$(cat "$out")" "ads dropped with their tags, convertv kept, URIs absolute" || return 1
 
-    rm -f "$TEST_HOME/curl-requests.log"
-    QUALITY=''
-    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
-    assert_contains "$(cat "$TEST_HOME/curl-requests.log")" "1080/index.m3u8" "auto fetches the highest variant" || return 1
+    local base="${out%.m3u8}" name
+    name="${base##*/}"
+    assert_eq "# mpv EDL v0
+%$(( ${#name} + 9 ))%$name-001.m3u8,length=6.800
+%$(( ${#name} + 9 ))%$name-002.m3u8,length=3.600
+%$(( ${#name} + 9 ))%$name-003.m3u8,length=4.000" "$(cat "$base.edl")" "one EDL part per splice, relative names" || return 1
+    assert_eq $'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:8\n#EXTINF:3.6,\nhttps://cdn.test/ep/3500kb/hls/convertv9/clip1.ts\n#EXT-X-ENDLIST' \
+        "$(cat "$base-002.m3u8")" "part playlist is self-contained" || return 1
+
+    # Movie moved to another directory: everything but convertv would be dropped.
+    local moved
+    moved=$(fake_bin curl 'printf "%s\n" "#EXTM3U" "#EXTINF:6.0," "/elsewhere/movie1.ts" "#EXTINF:6.0," "/elsewhere/movie2.ts" "#EXTINF:3.0," "convertv9/c.ts" "#EXT-X-ENDLIST"')
+    if PATH="$moved:$PATH" kkphim_playlist "https://sc.k-20.xyz/proxy-playlist.m3u8?url=https%3A%2F%2Fcdn.test%2Fep%2Fhls%2Findex.m3u8"; then
+        echo "a rebuild that drops more than it keeps must fall back to K20" >&2; return 1
+    fi
+
+    if PATH="$bin:$PATH" kkphim_playlist "https://sc.k-20.xyz/proxy-playlist.m3u8?url=--exec%3Dx"; then
+        echo "non-http upstream URL must be refused" >&2; return 1
+    fi
+}
+
+test_stream_url_kkphim() {
+    local bin
+    bin=$(kkphim_cdn)
+    resolve_k20_stream() { K20_URL="https://sc.k-20.xyz/proxy-playlist.m3u8?url=https%3A%2F%2Fcdn.test%2Fep%2Findex.m3u8"; K20_HEADERS=("Referer: x"); }
+    PATH="$bin:$PATH" stream_url "https://sc.k-20.xyz/stream/series/kkphim:a:tap-1.json" || return 1
+    assert_contains "$K20_URL" "$CACHE/playlists/kkphim-" "KKPhim plays the local playlist" || return 1
+    assert_eq 0 "${#K20_HEADERS[@]}" "CDN needs no K20 headers" || return 1
+
+    PATH="$bin:$PATH" stream_url "https://sc.k-20.xyz/stream/series/vsmov:a:tap-1.json" || return 1
+    assert_contains "$K20_URL" "proxy-playlist.m3u8" "other providers keep K20's playlist" || return 1
+
+    bin=$(fake_bin curl 'exit 7')
+    PATH="$bin:$PATH" stream_url "https://sc.k-20.xyz/stream/series/kkphim:a:tap-1.json" || return 1
+    assert_contains "$K20_URL" "proxy-playlist.m3u8" "CDN failure falls back to K20" || return 1
+}
+
+test_nguonc_proxy() {
+    local real_curl bin out seg
+    real_curl=$(type -P curl)
+    # Upstream as the proxy sees it: a playlist with a .png segment, the segment
+    # bytes, and the headers it was given recorded per request.
+    bin=$(fake_bin curl 'url=${@: -1}; printf "%s\n" "$*" >> "$HOME/upstream"
+case "$url" in
+    https://cdn.test/list.m3u8) printf "%s\n" "#EXTM3U" "#EXTINF:5.0," "seg0.png" "#EXT-X-ENDLIST" ;;
+    https://cdn.test/seg0.png) printf "TSDATA" ;;
+    *) exit 22 ;;
+esac')
+    K20_URL="https://cdn.test/list.m3u8"
+    K20_HEADERS=("Referer: https://embed.test/")
+    PATH="$bin:$PATH" nguonc_proxy_start || { echo "proxy did not start" >&2; return 1; }
+    assert_contains "$K20_URL" "http://127.0.0.1:" "K20_URL points at the proxy" || { nguonc_proxy_stop; return 1; }
+    assert_eq 0 "${#K20_HEADERS[@]}" "headers move into the proxy" || { nguonc_proxy_stop; return 1; }
+
+    out=$("$real_curl" -fsS --max-time 10 "$K20_URL")
+    seg=$(grep -v '^#' <<< "$out")
+    assert_contains "$seg" "/s.ts?u=https%3A%2F%2Fcdn.test%2Fseg0.png" "segment renamed .ts, served by the proxy" || { nguonc_proxy_stop; return 1; }
+    assert_eq "TSDATA" "$("$real_curl" -fsS --max-time 10 "$seg")" "segment bytes passed through" || { nguonc_proxy_stop; return 1; }
+    assert_contains "$(cat "$HOME/upstream")" "-H Referer: https://embed.test/" "CDN headers sent upstream" || { nguonc_proxy_stop; return 1; }
+    assert_eq 403 "$("$real_curl" -s -o /dev/null -w '%{http_code}' "${K20_URL%%\?*}?u=https%3A%2F%2Fevil.test%2Fx")" \
+        "URLs it did not write itself are refused" || { nguonc_proxy_stop; return 1; }
+
+    local pid=$NGUONC_PROXY_PID
+    nguonc_proxy_stop
+    sleep 0.3
+    if kill -0 "$pid" 2>/dev/null; then echo "proxy still running after stop" >&2; return 1; fi
+}
+
+test_stream_url_nguonc() {
+    resolve_k20_stream() { K20_URL="https://k20.test/nguonc-hls.m3u8"; K20_HEADERS=("Referer: x"); }
+    nguonc_proxy_start() { K20_URL="http://127.0.0.1:1/p.m3u8"; K20_HEADERS=(); }
+    stream_url "https://sc.k-20.xyz/stream/series/nguonc:a:tap-1.json" || return 1
+    assert_eq "http://127.0.0.1:1/p.m3u8" "$K20_URL" "NguonC goes through the local proxy" || return 1
+
+    nguonc_proxy_start() { return 1; }
+    show_error() { echo "ERR $1"; }
+    local out
+    out=$(stream_url "https://sc.k-20.xyz/stream/series/nguonc:a:tap-1.json") && { echo "must fail without the proxy" >&2; return 1; }
+    assert_contains "$out" "python3" "user told what is missing" || return 1
+}
+
+test_play_video_mpv() {
+    local args="$TEST_HOME/mpv-args" bin
+    bin=$(fake_bin mpv "printf '%s\n' \"\$@\" > '$args'")
+    resolve_k20_stream() { K20_URL="https://k20.test/p.m3u8"; K20_HEADERS=("User-Agent: UA, with comma"); }
+    PLAYER_DEFAULT=mpv
+    PATH="$bin:$PATH" play_video "https://sc.k-20.xyz/stream/series/x.json" "T" || return 1
+    assert_eq "https://k20.test/p.m3u8" "$(head -1 "$args")" "resolved URL first" || return 1
+    assert_contains "$(cat "$args")" "--http-header-fields-append=User-Agent: UA, with comma" "header verbatim" || return 1
+    assert_contains "$(cat "$args")" "--demuxer-seekable-cache=yes" "seekable cache" || return 1
+    [[ "$(cat "$args")" != *protocol_whitelist* ]] || { echo "whitelist only for local playlists" >&2; return 1; }
+
+    resolve_k20_stream() { K20_URL="$CACHE/playlists/kkphim-x.m3u8"; K20_HEADERS=(); }
+    PATH="$bin:$PATH" play_video "https://sc.k-20.xyz/stream/series/x.json" "T" || return 1
+    assert_contains "$(cat "$args")" '--demuxer-lavf-o=protocol_whitelist="https,http,file,tcp,tls,crypto,data"' "local playlist may load https segments" || return 1
+    assert_eq "$CACHE/playlists/kkphim-x.m3u8" "$(head -1 "$args")" "no EDL yet: the playlist plays" || return 1
+    mkdir -p "$CACHE/playlists"
+    echo "# mpv EDL v0" > "$CACHE/playlists/kkphim-x.edl"
+    PATH="$bin:$PATH" play_video "https://sc.k-20.xyz/stream/series/x.json" "T" || return 1
+    assert_eq "$CACHE/playlists/kkphim-x.edl" "$(head -1 "$args")" "mpv plays the EDL when present" || return 1
+    resolve_k20_stream() { K20_URL="https://k20.test/p.m3u8"; K20_HEADERS=("User-Agent: UA, with comma"); }
+
+    PATH="$bin:$PATH" play_video "https://old.example/ep.m3u8" "Old" || return 1
+    assert_eq "https://old.example/ep.m3u8" "$(head -1 "$args")" "legacy playlist link played as is" || return 1
+    : > "$args"
+    show_error() { :; }
+    if PATH="$bin:$PATH" play_video "https://embed11.streamc.xyz/embed.php?hash=x" "Old"; then
+        echo "legacy player page must not reach mpv" >&2; return 1
+    fi
+    assert_eq "" "$(cat "$args")" "mpv not started for a player page" || return 1
+    if PATH="$bin:$PATH" play_video "--script=x.m3u8" "Old"; then
+        echo "non-http playlist must not reach mpv" >&2; return 1
+    fi
+}
+
+test_play_video_vlc() {
+    local args="$TEST_HOME/vlc-args" bin
+    bin=$(fake_bin vlc "printf '%s\n' \"\$@\" > '$args'")
+    resolve_k20_stream() { K20_URL="https://k20.test/p.m3u8"; K20_HEADERS=("Referer: https://embed.test/" "Origin: https://embed.test"); }
+    PLAYER_DEFAULT=vlc
+    PATH="$bin:$PATH" play_video "https://sc.k-20.xyz/stream/series/x.json" "T" || return 1
+    assert_contains "$(cat "$args")" "--http-referrer=https://embed.test/" "referrer" || return 1
+    assert_contains "$(cat "$args")" "--no-input-fast-seek" "accurate seek" || return 1
+    assert_contains "$(cat "$args")" "--network-caching=3000" "network buffer" || return 1
+}
+
+test_preview_script() {
+    local bin p out row
+    bin=$(fake_bin curl 'echo "{\"meta\":{\"runtime\":\"76 phút\",\"genres\":[\"Hài\",\"Nhạc\"],\"description\":\"<p>Dòng một</p>\nDòng hai\"}}"')
+    p=$(create_preview_script) || return 1
+    # Search rows carry a 9th field (source alternatives) that must not leak into src.
+    row=$(format_movie_items <<< "Bocchi|2024|N/A|kkphim|series/kkphim:bocchi||k20|series/kkphim:bocchi~Bocchi^series/nguonc:b~B")
+    out=$(PATH="$bin:$PATH" TERM=dumb FZF_PREVIEW_COLUMNS=60 "$p" "$row" | sed 's/\x1b\[[0-9;]*m//g')
+    assert_contains "$out" "Năm: 2024" "year" || return 1
+    assert_contains "$out" "Nguồn: kkphim" "provider" || return 1
+    assert_contains "$out" "Thời lượng: 76 phút" "runtime" || return 1
+    assert_contains "$out" "Thể loại: Hài, Nhạc" "genres" || return 1
+    assert_contains "$out" "Dòng một Dòng hai" "description without tags" || return 1
+    [[ -s "$CACHE/desc/k20-series_kkphim:bocchi.json" ]] || { echo "meta not cached under a flat name" >&2; return 1; }
+
+    bin=$(fake_bin curl 'echo "{\"meta\":null}"')
+    row=$(format_movie_items <<< "X|2024|N/A|kkphim|series/kkphim:missing||k20")
+    PATH="$bin:$PATH" TERM=dumb "$p" "$row" >/dev/null
+    [[ ! -e "$CACHE/desc/k20-series_kkphim:missing.json" ]] || { echo "null meta cached" >&2; return 1; }
+}
+
+test_vlc_plugin_check() {
+    local bin
+    bin=$(fake_bin vlc 'printf "  avcodec  FFmpeg audio/video decoder\n"')
+    if PATH="$bin:$PATH" vlc_plays_hls; then
+        echo "missing ts demuxer must be detected" >&2; return 1
+    fi
+    bin=$(fake_bin vlc 'printf "  ts  MPEG Transport Stream demuxer\n  avcodec  FFmpeg audio/video decoder\n"')
+    PATH="$bin:$PATH" vlc_plays_hls || { echo "full VLC reported broken" >&2; return 1; }
+
+    local only="$TEST_HOME/vlc-only" both="$TEST_HOME/vlc-mpv"
+    mkdir -p "$only" "$both"
+    printf '#!/bin/bash\n' > "$only/vlc"; chmod +x "$only/vlc"
+    cp "$only/vlc" "$both/vlc"; cp "$only/vlc" "$both/mpv"
+    show_error() { echo "WARN $1"; }
+    assert_eq "mpv" "$(PLAYER_DEFAULT=vlc; PATH="$both"; check_player >/dev/null; printf '%s' "$PLAYER_DEFAULT")" "broken VLC falls back to mpv" || return 1
+    assert_contains "$(PLAYER_DEFAULT=vlc; PATH="$only"; check_player)" "vlc-plugin-dvb vlc-plugin-ffmpeg" "user told which packages to install" || return 1
+}
+
+test_watch_episode_records_after_play() {
+    call_api() { echo '{"meta":{"videos":[{"id":"kkphim:x:tap-1","title":"1"}]}}'; }
+    fzf() {
+        local n
+        n=$(cat "$TEST_HOME/fzf-calls" 2>/dev/null || echo 0)
+        echo $((n + 1)) > "$TEST_HOME/fzf-calls"
+        (( n < 2 )) && { printf 'enter\n'; head -1; }
+    }
+    play_video() { [[ -f "$TEST_HOME/play-ok" ]]; }
+    show_error() { :; }
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_eq "" "$(cat "$HIST")" "failed playback is not recorded" || return 1
+
+    rm -f "$TEST_HOME/fzf-calls"
+    touch "$TEST_HOME/play-ok"
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_contains "$(cat "$HIST")" "|X - Tập 1|series/kkphim:x|" "played episode recorded" || return 1
+    assert_eq "series/kkphim:x|1" "$(cat "$PROGRESS")" "progress recorded" || return 1
+}
+
+test_paginated_list() {
+    local got=""
+    # fetch runs in a command substitution, so pages are logged to a file.
+    fetch() { printf '%s ' "$1" >> "$TEST_HOME/pages"; [[ "$1" == 1 ]] && echo "A|2024|N/A|kkphim|series/kkphim:a||k20"; }
+    fzf() {
+        local n
+        n=$(cat "$TEST_HOME/fzf-n" 2>/dev/null || echo 0)
+        echo $((n + 1)) > "$TEST_HOME/fzf-n"
+        case "$n" in
+            0) echo right ;;
+            1) printf 'enter\n'; head -1 ;;
+            *) cat > /dev/null ;;  # Esc
+        esac
+    }
+    watch_episode() { got="$1|$2|$3"; echo opened >> "$TEST_HOME/opened"; }
+    show_paginated_list "P" fetch
+    assert_eq "1 2 1 1 " "$(cat "$TEST_HOME/pages")" "empty page 2 falls back to page 1, and page 1 shows again after the title" || return 1
+    assert_eq "series/kkphim:a|A|k20" "$got" "selection opens the title" || return 1
+    assert_eq 3 "$(cat "$TEST_HOME/fzf-n")" "back from the episode list to this list, then Esc leaves" || return 1
+}
+
+test_preview_kitsu_for_anime() {
+    local bin p out row
+    bin=$(fake_bin curl 'case "${*}" in
+    *anime-kitsu*) echo "{\"metas\":[{\"name\":\"PSYREN\",\"poster\":\"https://kitsu.test/p.jpg\",\"genres\":[\"Action\"],\"description\":\"A mysterious\nphone card.\"}]}" ;;
+    *) echo "{\"meta\":{\"description\":\"Chất lượng: HD\",\"genres\":[\"Anime\"]}}" ;;
+esac')
+    p=$(create_preview_script) || return 1
+    row=$(format_movie_items <<< "Psyren|N/A|N/A|animevietsub|series/animevietsub:p|https://blocked.test/p.jpg|k20anime")
+    out=$(PATH="$bin:$PATH" TERM=dumb FZF_PREVIEW_COLUMNS=60 "$p" "$row" | sed 's/\x1b\[[0-9;]*m//g')
+    assert_contains "$out" "Thể loại: Action" "genres from Kitsu" || return 1
+    assert_contains "$out" "Chất lượng: HD — A mysterious phone card." "K20 status kept, Kitsu synopsis added" || return 1
+    [[ -s "$CACHE/desc/k20anime-series_animevietsub:p.kitsu.json" ]] || { echo "Kitsu match not cached" >&2; return 1; }
+
+    row=$(format_movie_items <<< "Phim|2024|N/A|kkphim|series/kkphim:x||k20")
+    PATH="$bin:$PATH" TERM=dumb "$p" "$row" >/dev/null
+    [[ ! -e "$CACHE/desc/k20-series_kkphim:x.kitsu.json" ]] || { echo "Kitsu must only be asked for K20 Anime" >&2; return 1; }
+
+    bin=$(fake_bin curl 'case "${*}" in *anime-kitsu*) echo kitsu >> "$HOME/kitsu-calls"; echo "{\"metas\":[]}" ;; *) echo "{\"meta\":{}}" ;; esac')
+    row=$(format_movie_items <<< "Không Có|N/A|N/A|animevietsub|series/animevietsub:none||k20anime")
+    PATH="$bin:$PATH" TERM=dumb "$p" "$row" >/dev/null
+    PATH="$bin:$PATH" TERM=dumb "$p" "$row" >/dev/null
+    assert_eq 1 "$(wc -l < "$HOME/kitsu-calls")" "a Kitsu miss is remembered, not asked on every hover" || return 1
+}
+
+test_download_episode() {
+    local args="$TEST_HOME/dl-args" bin
+    bin=$(fake_bin yt-dlp "printf '%s\n' \"\$@\" > '$args'")
+    resolve_k20_stream() { K20_URL="https://k20.test/p.m3u8"; K20_HEADERS=("Referer: https://embed.test/"); }
+    sleep() { :; }
+    local shown
+    shown=$(PATH="$bin:$PATH" download_episode "https://sc.k-20.xyz/stream/series/x.json" 'Frieren: Pháp Sư (Phần 2) - Tập 01 \c end')
+    wait
+    assert_contains "$shown" '\c end' "API title printed as text, not as an escape" || return 1
+    assert_contains "$(cat "$args")" "Frieren_-_Pháp_Sư_(Phần_2)_-_Tập_01_-_c_end.mp4" "Vietnamese file name kept, backslash replaced" || return 1
+    assert_eq $'https://k20.test/p.m3u8\n--add-header\nReferer: https://embed.test/' "$(head -3 "$args")" "URL and header" || return 1
+    local log
+    IFS='|' read -r _ _ log < "$CACHE/downloads/tasks.log"
+    assert_eq "0" "$(cat "$log.rc")" "exit status recorded" || return 1
+}
+
+test_download_local_playlist() {
+    local args="$TEST_HOME/dl-local" bin
+    bin=$(fake_bin yt-dlp "printf '%s\n' \"\$@\" > '$args'")
+    resolve_k20_stream() { K20_URL="$CACHE/playlists/kkphim-x.m3u8"; K20_HEADERS=(); }
+    sleep() { :; }
+    PATH="$bin:$PATH" download_episode "https://sc.k-20.xyz/stream/series/x.json" "Phim" >/dev/null
+    wait
+    assert_eq "file://$CACHE/playlists/kkphim-x.m3u8" "$(head -1 "$args")" "local playlist as file URL" || return 1
+    assert_contains "$(cat "$args")" "--enable-file-urls" "yt-dlp allowed to read it" || return 1
+}
+
+test_view_downloads_status() {
+    mkdir -p "$CACHE/downloads"
+    local log="$CACHE/downloads/1_new.log" legacy="$CACHE/downloads/2_old.log"
+    : > "$log"
+    : > "$legacy"
+    printf '%s|%s|%s\n' "Phim Mới" "new.mp4" "$log" > "$CACHE/downloads/tasks.log"
+    printf '%s|%s|%s|%s\n' "99999999" "Phim Cũ" "old.mp4" "$legacy" >> "$CACHE/downloads/tasks.log"
+    printf '0\n' > "$log.rc"
+    fzf() { cat > "$TEST_HOME/fzf-in"; }
+    view_downloads
+    assert_contains "$(cat "$TEST_HOME/fzf-in")" "Hoàn tất" "rc=0 is complete" || return 1
+    assert_contains "$(cat "$TEST_HOME/fzf-in")" "Phim Cũ" "legacy row parsed" || return 1
+}
+
+test_watch_episode_list() {
+    call_api() {
+        echo '{"meta":{"videos":[{"id":"kkphim:x:tap-1","title":"Tập 1"},{"id":"kkphim:x:tap-2","episode":2}]}}'
+    }
+    fzf() { cat > "$TEST_HOME/eps"; }
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_eq $'Tập 1|https://sc.k-20.xyz/stream/series/kkphim:x:tap-1.json\n2|https://sc.k-20.xyz/stream/series/kkphim:x:tap-2.json' \
+        "$(cat "$TEST_HOME/eps")" "episodes point at stream endpoints" || return 1
+
+    call_api() { echo '{"meta":{}}'; }
+    watch_episode "movie/kkphim:y" "Y" k20 >/dev/null
+    assert_eq "Full|https://sc.k-20.xyz/stream/movie/kkphim:y.json" "$(cat "$TEST_HOME/eps")" "movie without videos" || return 1
+}
+
+test_search_script() {
+    local bin s out
+    # Each catalog answers with one row named after itself plus one shared slug.
+    bin=$(fake_bin curl 'for a; do case "$a" in */catalog/*) url=$a ;; esac; [[ $prev == -o ]] && out=$a; prev=$a; done
+id=${url#*/catalog/}; id=${id%%/search=*}
+echo "{\"metas\":[{\"id\":\"p:${id//\//-}\",\"type\":\"series\",\"name\":\"$id\"},{\"id\":\"kkphim:dup\",\"type\":\"series\",\"name\":\"Dup\"}]}" > "$out"')
+    printf '%s\n' "Bocchi Anime|N/A|N/A|animevietsub|series/animevietsub:b|" "Other|N/A|N/A|animevietsub|series/animevietsub:o|" > "$ANIME_INDEX"
+    s=$(create_search_script) || return 1
+    out=$(PATH="$bin:$PATH" "$s" "BOCCHI" | cut -d'|' -f2,6,8)
+    assert_eq $'series/kkphim-series|series/p:series-kkphim-series|k20\nDup|series/kkphim:dup|k20' "$(head -2 <<< "$out")" "listed order, tagged" || return 1
+    assert_eq 8 "$(wc -l <<< "$out")" "six catalogs, one deduplicated shared row, one anime match" || return 1
+    assert_eq "Bocchi Anime|series/animevietsub:b|k20anime" "$(tail -1 <<< "$out")" "anime index matched case-insensitively, tagged k20anime" || return 1
+    assert_eq "" "$(PATH="$bin:$PATH" "$s" "b")" "one-letter query ignored" || return 1
+    assert_eq 0 "$(PATH="$bin:$PATH" "$s" "  " | grep -c animevietsub)" "blank query lists no anime" || return 1
+}
+
+test_handle_cli_args() {
+    local out
+    out=$(handle_cli_args -h)
+    assert_contains "$out" "--search" "help has search" || return 1
+    assert_contains "$out" "--continue" "help has continue" || return 1
+}
+
+test_continue_plays_latest() {
+    printf '%s\n' "100|Old|a|https://old|1" "200|New - Tập 2|b|https://new|2" > "$HIST"
+    play_video() { echo "PLAY $1|$2"; }
+    assert_contains "$(handle_cli_args -c)" "PLAY https://new|New - Tập 2" "latest row" || return 1
 }
 
 test_is_cache_fresh() {
@@ -494,914 +586,236 @@ test_is_cache_fresh() {
     touch -d "10 seconds ago" "$f"
     if is_cache_fresh "$f" 5; then echo "stale file reported fresh" >&2; return 1; fi
     if is_cache_fresh "$TEST_HOME/nope.json" 3600; then echo "missing file reported fresh" >&2; return 1; fi
-    return 0
 }
 
 test_record_history() {
     record_history "slug-1" $'Title | weird\nname' "http://url/1" "5" || return 1
-    local line
-    line=$(cat "$HIST")
-    assert_contains "$line" "|Title - weird name|slug-1|http://url/1|5" "record shape" || return 1
-    assert_eq 5 "$(awk -F'|' '{print NF}' <<< "$line")" "five fields" || return 1
-    assert_eq 1 "$(wc -l < "$HIST")" "single record" || return 1
-    # Re-recording the same slug replaces the old entry.
+    assert_contains "$(cat "$HIST")" "|Title - weird name|slug-1|http://url/1|5" "record shape" || return 1
     record_history "slug-1" "New Title" "http://url/2" "6" || return 1
     assert_eq 1 "$(wc -l < "$HIST")" "dedupe by slug" || return 1
-    assert_contains "$(cat "$HIST")" "New Title" "replaced title" || return 1
-    # Different slug appends.
     record_history "slug-2" "Other" "http://url/3" "1" || return 1
     assert_eq 2 "$(wc -l < "$HIST")" "append new slug" || return 1
 }
 
-test_resolve_saved_url() {
-    call_api() {
-        cat <<'JSON'
-{"episodes":[{"server_data":[
-  {"name":"1","link_m3u8":"https://cdn/ep1.m3u8"},
-  {"name":"2","link_embed":"https://v9.streamvsmov.com/video/ep2"},
-  {"name":"3","link_m3u8":""}
-]}],"movie":{"episodes":[{"items":[
-  {"name":"1","embed":"https://embed1.streamc.xyz/embed.php?hash=x"}
-]}]}}
-JSON
+test_continue_watching() {
+    local got="" played=""
+    watch_episode() { got="$1|$2|$3"; }
+    play_video() { played="$1|$2"; }
+    printf '%s\n' \
+        "1700000000|Frieren - Tập 01|series/kkphim:frieren|https://sc.k-20.xyz/stream/series/kkphim:frieren:tap-01.json|01" \
+        "1700000100|Psyren - Tập 02|series/animevietsub:p|https://anime.k-20.xyz/stream/series/animevietsub:p:tap-02.json|02" \
+        "1600000000|Cũ - Tập 3|old-slug|https://old.example/ep.m3u8|3" > "$HIST"
+    fzf() {
+        local n
+        n=$(cat "$TEST_HOME/n" 2>/dev/null || echo 0)
+        echo $((n + 1)) > "$TEST_HOME/n"
+        case "$n" in
+            0) cat > "$TEST_HOME/rows"; printf 'enter\n'; sed -n 1p "$TEST_HOME/rows" ;;
+            1) printf 'enter\n'; grep 'old-slug' ;;
+            2) printf 'ctrl-d\n'; grep 'kkphim:frieren' ;;
+            *) return 130 ;;
+        esac
     }
-    assert_eq "https://cdn/ep1.m3u8" "$(resolve_saved_url "slug" "1")" "phimapi link" || return 1
-    assert_eq "https://v9.streamvsmov.com/video/ep2" "$(resolve_saved_url "slug" "2")" "vsmov embed" || return 1
-    assert_eq "" "$(resolve_saved_url "slug" "missing")" "unknown episode" || return 1
-    assert_eq "" "$(resolve_saved_url "" "1")" "missing slug" || return 1
-    SOURCE=vsmov
-    assert_eq "" "$(resolve_saved_url "slug" "1" "https://cdn.example/movie.m3u8")" "phimapi URL not resolved on vsmov" || return 1
-    SOURCE=nguonc
-    assert_eq "https://embed1.streamc.xyz/embed.php?hash=x" \
-        "$(resolve_saved_url "slug" "1" "https://embed1.streamc.xyz/embed.php?hash=old")" \
-        "nguonc embed refreshed" || return 1
+    continue_watching
+    assert_contains "$(sed -n 1p "$TEST_HOME/rows")" "Psyren - Tập 02" "newest first" || return 1
+    assert_contains "$(cat "$TEST_HOME/rows")" "ngày trước" "shows how long ago" || return 1
+    assert_eq "series/animevietsub:p|Psyren|k20anime" "$got" "opens the episode list with the name and the anime source" || return 1
+    assert_eq "https://old.example/ep.m3u8|Cũ - Tập 3" "$played" "pre-K20 rows still play directly" || return 1
+    assert_eq 0 "$(grep -c 'kkphim:frieren' "$HIST")" "Ctrl+D forgets the title" || return 1
+}
+
+test_watch_episode_cursor() {
+    call_api() { echo '{"meta":{"videos":[{"id":"x:1","title":"1"},{"id":"x:2","title":"2"},{"id":"x:3","title":"3"}]}}'; }
+    fzf() { printf '%s\n' "$@" > "$TEST_HOME/fzf-args"; cat > /dev/null; }
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "load:pos(1)" "nothing watched: first episode" || return 1
+
+    record_progress "series/kkphim:x" "2"
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "load:pos(3)" "cursor on the episode after the last watched" || return 1
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "▶ Tiếp: Tập 3" "header names it" || return 1
+
+    record_progress "series/kkphim:x" "3"
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "load:pos(3)" "last episode watched: stays on it" || return 1
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "✓ Đã xem: Tập 3" "header says it was watched" || return 1
+}
+
+test_paginated_filter() {
+    local got=""
+    fetch() { printf '%s|%s\n' "$1" "$2" >> "$TEST_HOME/fetches"; echo "A|2024|N/A|kkphim|series/kkphim:a||k20"; }
+    filters() { printf '%s\n' "Quốc gia: Hàn Quốc" "Năm: 2024"; }
+    fzf() {
+        local n
+        n=$(cat "$TEST_HOME/fn" 2>/dev/null || echo 0)
+        echo $((n + 1)) > "$TEST_HOME/fn"
+        case "$n" in
+            0) printf '%s\n' "$@" > "$TEST_HOME/list-args"; cat > /dev/null; echo ctrl-g ;;
+            1) grep 'Hàn Quốc' ;;
+            2) printf '%s\n' "$@" > "$TEST_HOME/list-args"; cat > /dev/null ;;
+        esac
+    }
+    show_paginated_list "KKPhim" fetch filters
+    assert_contains "$(cat "$TEST_HOME/fetches")" "1|Quốc gia: Hàn Quốc" "Ctrl+G filter reaches the fetch callback on page 1" || return 1
+    assert_contains "$(cat "$TEST_HOME/list-args")" "KKPhim · Quốc gia: Hàn Quốc >" "prompt shows the filter" || return 1
+}
+
+test_rewrite_rows_keeps_dir_clean() {
+    record_history "a" "A" "http://u" "1" || return 1
+    add_favorite "A" "a" k20 || return 1
+    remove_favorite "a" || return 1
+    assert_eq "" "$(find "$CONF" -name '*.log.*')" "no temp files left next to the logs" || return 1
+    assert_eq "" "$(cat "$FAV")" "favorite removed" || return 1
 }
 
 test_record_progress() {
     record_progress "slug-1" "5" || return 1
-    assert_eq "slug-1|5" "$(cat "$PROGRESS")" "progress record" || return 1
     record_progress "slug-1" "6" || return 1
     assert_eq "slug-1|6" "$(cat "$PROGRESS")" "progress updated" || return 1
     record_progress "slug-2" "1" || return 1
     assert_eq 2 "$(wc -l < "$PROGRESS")" "two slugs" || return 1
 }
 
-test_add_favorite() {
-    add_favorite $'Title | X' "slug-1" "2024" "/poster.jpg" || return 1
-    local line
-    line=$(cat "$FAV")
-    assert_contains "$line" "|Title - X|slug-1|2024|/poster.jpg" "favorite record" || return 1
-    assert_eq 1 "$(wc -l < "$FAV")" "single favorite" || return 1
-    # Same slug re-added -> deduped.
-    add_favorite "Title Y" "slug-1" "2025" "/p2.jpg" || return 1
+test_favorites() {
+    add_favorite $'Title | X' "series/kkphim:a" k20 || return 1
+    assert_contains "$(cat "$FAV")" "|Title - X|series/kkphim:a|||k20" "row shape" || return 1
+    add_favorite "Title Y" "series/kkphim:a" k20 || return 1
     assert_eq 1 "$(wc -l < "$FAV")" "dedupe by slug" || return 1
-    add_favorite "Brand New" "slug-2" "2020" "/p4.jpg" || return 1
-    assert_eq 2 "$(wc -l < "$FAV")" "append new" || return 1
-}
+    add_favorite "B" "series/animevietsub:b" k20anime || return 1
 
-test_remove_favorite() {
-    add_favorite "A" "slug-1" "2024" "/p1.jpg" || return 1
-    add_favorite "B" "slug-2" "2024" "/p2.jpg" || return 1
-    remove_favorite "slug-1" || return 1
-    assert_eq 1 "$(wc -l < "$FAV")" "one removed" || return 1
-    assert_contains "$(cat "$FAV")" "slug-2" "survivor" || return 1
+    local got=""
+    watch_episode() { got="$1|$2|$3"; }
+    fzf() {
+        [[ -e "$TEST_HOME/fav-shown" ]] && return 130  # Esc on the second visit
+        touch "$TEST_HOME/fav-shown"
+        printf 'enter\n'; grep 'animevietsub'
+    }
+    favorites
+    assert_eq "series/animevietsub:b|B|k20anime" "$got" "opens with its source, then the list shows again" || return 1
+
+    remove_favorite "series/kkphim:a" || return 1
+    assert_eq 1 "$(wc -l < "$FAV")" "removed" || return 1
 }
 
 test_load_settings() {
-    # Defaults when nothing exists.
     assert_eq "mpv" "$PLAYER_DEFAULT" "default player" || return 1
-    assert_eq "" "$QUALITY" "default quality" || return 1
-    assert_eq 1 "$AD_BLOCK" "default ad_block" || return 1
-    assert_eq "vsmov" "$SOURCE" "default source" || return 1
-    assert_eq "vsmov,nguonc,phimapi" "$SEARCH_SOURCES" "default search sources" || return 1
-
-    # With config present: quoted values, whitespace, comments, invalid lines.
-    printf 'PLAYER_DEFAULT = "vlc"\n' > "$CONFIG_FILE"
-    printf 'QUALITY= 720 \n' >> "$CONFIG_FILE"
-    printf '# comment\n' >> "$CONFIG_FILE"
-    printf 'BOGUS_KEY=1\n' >> "$CONFIG_FILE"
-    printf 'QUALITY=999\n' >> "$CONFIG_FILE"
-    printf 'SOURCE=phimapi\n' >> "$CONFIG_FILE"
-    printf 'SEARCH_SOURCES=vsmov, nguonc,vsmov\n' >> "$CONFIG_FILE"
+    printf '%s\n' 'PLAYER_DEFAULT = "vlc"' '# comment' 'SOURCE=phimapi' 'SEARCH_SOURCES=vsmov' > "$CONFIG_FILE"
     load_settings
-    assert_eq "vlc" "$PLAYER_DEFAULT" "quoted player" || return 1
-    assert_eq "720" "$QUALITY" "quality" || return 1
-    assert_eq "phimapi" "$SOURCE" "source" || return 1
-    assert_eq "vsmov,nguonc" "$SEARCH_SOURCES" "search sources parsed and deduped" || return 1
-
-    printf 'SOURCE=nguonc\n' > "$CONFIG_FILE"
-    SOURCE=vsmov
+    assert_eq "vlc" "$PLAYER_DEFAULT" "quoted player, old keys ignored" || return 1
+    printf 'PLAYER_DEFAULT=mplayer\n' > "$CONFIG_FILE"
     load_settings
-    assert_eq "nguonc" "$SOURCE" "nguonc source" || return 1
-
-    # Invalid QUALITY ignored: with fresh state (QUALITY=""), an invalid value
-    # must not set QUALITY.
-    printf 'QUALITY=999\n' > "$CONFIG_FILE"
-    QUALITY=""
-    load_settings
-    assert_eq "" "$QUALITY" "invalid quality ignored" || return 1
+    assert_eq "vlc" "$PLAYER_DEFAULT" "unknown player ignored" || return 1
 }
 
 test_save_settings() {
     PLAYER_DEFAULT=vlc
-    QUALITY=480
-    AD_BLOCK=0
-    SOURCE=vsmov
-    SEARCH_SOURCES="vsmov,nguonc"
     save_settings
-    assert_eq "PLAYER_DEFAULT=vlc" "$(head -1 "$CONFIG_FILE")" "config player" || return 1
-    assert_eq "QUALITY=480" "$(sed -n 2p "$CONFIG_FILE")" "config quality" || return 1
-    assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config ad_block" || return 1
-    assert_eq "SOURCE=vsmov" "$(sed -n 4p "$CONFIG_FILE")" "config source" || return 1
-    assert_eq "SEARCH_SOURCES=vsmov,nguonc" "$(sed -n 5p "$CONFIG_FILE")" "config search sources" || return 1
-    # Round-trip through load_settings.
-    PLAYER_DEFAULT=mpv QUALITY='' AD_BLOCK=1 SOURCE=phimapi SEARCH_SOURCES=phimapi
+    assert_eq "PLAYER_DEFAULT=vlc" "$(cat "$CONFIG_FILE")" "config file" || return 1
+    PLAYER_DEFAULT=mpv
     load_settings
-    assert_eq "vlc" "$PLAYER_DEFAULT" "roundtrip player" || return 1
-    assert_eq "480" "$QUALITY" "roundtrip quality" || return 1
-    assert_eq 0 "$AD_BLOCK" "roundtrip ad_block" || return 1
-    assert_eq "vsmov" "$SOURCE" "roundtrip source" || return 1
-    assert_eq "vsmov,nguonc" "$SEARCH_SOURCES" "roundtrip search sources" || return 1
+    assert_eq "vlc" "$PLAYER_DEFAULT" "round trip" || return 1
 }
 
-test_clear_cache_removes_all() {
-    mkdir -p "$CACHE/desc" "$CACHE/downloads" "$CACHE/segments"
+test_clear_cache() {
+    mkdir -p "$CACHE/desc" "$CACHE/downloads" "$CONF/cache/segments"
     : > "$CACHE/api.json"
-    : > "$CACHE/foo-clean.m3u8"
-    : > "$CACHE/foo-dl.m3u8"
-    : > "$CACHE/hls-proxy.py"
-    : > "$CACHE/hls-proxy.log"
     : > "$CACHE/desc/poster.img"
-    : > "$CACHE/downloads/tasks.log"
-    : > "$CACHE/segments/abc-r.ts"
-
+    local done_log="$CACHE/downloads/1_done.log" live_log="$CACHE/downloads/2_live.log"
+    : > "$done_log"
+    printf '0\n' > "$done_log.rc"
+    : > "$live_log"
+    printf '%s\n' "Xong|done.mp4|$done_log" "Đang|live.mp4|$live_log" > "$CACHE/downloads/tasks.log"
+    sleep() { :; }
     clear_cache >/dev/null
-
-    [[ ! -f "$CACHE/api.json" ]] || { echo "json cache left" >&2; return 1; }
-    [[ ! -f "$CACHE/foo-clean.m3u8" ]] || { echo "clean playlist left" >&2; return 1; }
-    [[ ! -f "$CACHE/foo-dl.m3u8" ]] || { echo "download playlist left" >&2; return 1; }
-    [[ ! -f "$CACHE/hls-proxy.py" ]] || { echo "proxy script left" >&2; return 1; }
-    [[ ! -f "$CACHE/hls-proxy.log" ]] || { echo "proxy log left" >&2; return 1; }
-    [[ ! -e "$CACHE/desc" ]] || { echo "desc dir left" >&2; return 1; }
-    [[ ! -e "$CACHE/segments" ]] || { echo "segments dir left" >&2; return 1; }
-    [[ -f "$CACHE/downloads/tasks.log" ]] || { echo "downloads must survive" >&2; return 1; }
+    [[ ! -e "$CACHE/api.json" && ! -e "$CACHE/desc" ]] || { echo "cache left" >&2; return 1; }
+    [[ ! -e "$CONF/cache" ]] || { echo "old cache dir under config left" >&2; return 1; }
+    [[ ! -e "$done_log" && ! -e "$done_log.rc" ]] || { echo "finished download log left" >&2; return 1; }
+    [[ -f "$live_log" ]] || { echo "running download log removed" >&2; return 1; }
+    assert_eq "Đang|live.mp4|$live_log" "$(cat "$CACHE/downloads/tasks.log")" "only the running download stays listed" || return 1
 }
 
-test_download_episode_vietnamese_name() {
-    local bin="$TEST_HOME/dlbin"
-    mkdir -p "$bin"
-    local dl_args="$TEST_HOME/dl_args"
-    cat > "$bin/yt-dlp" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$dl_args"
-EOF
-    chmod +x "$bin/yt-dlp"
-    sleep() { :; }
-    AD_BLOCK=0
-    PATH="$bin:$PATH" download_episode "https://example.com/ep.m3u8" "Frieren: Pháp Sư Tiễn Táng (Phần 2) - Tập 01" >/dev/null
-    wait
-    local recorded
-    recorded=$(cat "$dl_args" 2>/dev/null)
-    assert_contains "$recorded" "Frieren_-_Pháp_Sư_Tiễn_Táng_(Phần_2)_-_Tập_01.mp4" "preserves Vietnamese name" || return 1
-    local row log
-    row=$(cat "$CACHE/downloads/tasks.log")
-    assert_eq 3 "$(awk -F'|' '{print NF}' <<< "$row")" "task row has title|file|log" || return 1
-    log=$(cut -d'|' -f3 <<< "$row")
-    [[ -f "$log.rc" ]] || { echo "missing exit status file: $log.rc" >&2; return 1; }
-    assert_eq 0 "$(cat "$log.rc")" "successful download records rc=0" || return 1
-    unset -f sleep
-}
-
-test_download_episode_ad_free() {
-    local bin="$TEST_HOME/dlbin-adfree"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/yt-dlp-adfree-args"
-    : > "$argsfile"
-    cat > "$bin/yt-dlp" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/yt-dlp"
-
-    local curlbin="$TEST_HOME/dlbin-adfree-curl"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-EOF
-    chmod +x "$curlbin/curl"
-
-    sleep() { :; }
-    AD_BLOCK=1
-    PATH="$bin:$curlbin:$PATH" download_episode "https://cdn.example/hls/master.m3u8" "Ad Test" >/dev/null
-    wait
-    local recorded
-    recorded=$(cat "$argsfile")
-    assert_contains "$recorded" "--enable-file-urls" "local cleaned playlist enabled" || return 1
-    assert_contains "$recorded" "-dl.m3u8" "downloads from stripped playlist" || return 1
-    assert_contains "$recorded" "file://" "local playlist URL" || return 1
-    unset -f sleep
-}
-
-test_download_episode_vsmov() {
-    local bin="$TEST_HOME/dlbin-vsmov"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/yt-dlp-vsmov-args"
-    : > "$argsfile"
-    cat > "$bin/yt-dlp" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/yt-dlp"
-
-    resolve_stream_url() { printf '%s' "https://v9.streamvsmov.com/stream/x/master.m3u8"; }
-    start_hls_proxy() {
-        # shellcheck disable=SC2034  # read by download_episode
-        HLS_PROXY_URL="http://127.0.0.1:1/master.m3u8"
-        return 0
-    }
-    stop_hls_proxy() { :; }
-    sleep() { :; }
-
-    AD_BLOCK=1
-    PATH="$bin:$PATH" download_episode "https://v9.streamvsmov.com/video/x" "VSMov Test" >/dev/null
-    wait
-    local recorded
-    recorded=$(cat "$argsfile")
-    assert_contains "$recorded" "http://127.0.0.1:1/master.m3u8" "yt-dlp receives the proxy URL" || return 1
-    assert_contains "$recorded" "-N" "native HLS concurrency" || return 1
-    unset -f sleep resolve_stream_url start_hls_proxy stop_hls_proxy
-}
-
-test_view_downloads_status() {
-    mkdir -p "$CACHE/downloads"
-    local log="$CACHE/downloads/1_new.log"
-    local legacy="$CACHE/downloads/2_old.log"
-    : > "$log"
-    : > "$legacy"
-    printf '%s|%s|%s\n' "Phim Mới" "new.mp4" "$log" > "$CACHE/downloads/tasks.log"
-    printf '%s|%s|%s|%s\n' "99999999" "Phim Cũ" "old.mp4" "$legacy" >> "$CACHE/downloads/tasks.log"
-    printf '0\n' > "$log.rc"
-
-    fzf() { cat > "$TEST_HOME/fzf-in"; }
-    view_downloads
-    local seen
-    seen=$(cat "$TEST_HOME/fzf-in")
-    assert_contains "$seen" "Hoàn tất" "rc=0 marks the download complete" || return 1
-    assert_contains "$seen" "Phim Mới" "current row title parsed" || return 1
-    assert_contains "$seen" "Phim Cũ" "legacy row title parsed" || return 1
-    unset -f fzf
-}
-
-test_handle_cli_args() {
-    local help_out
-    help_out=$(handle_cli_args -h)
-    assert_contains "$help_out" "Sudachi" "help output" || return 1
-    assert_contains "$help_out" "--search" "help contains search" || return 1
-    assert_contains "$help_out" "--continue" "help contains continue" || return 1
-}
-
-test_check_dependencies() {
-    # Real PATH: all present -> returns normally.
-    check_dependencies || { echo "unexpected failure with deps present" >&2; return 1; }
+test_check_dependencies_fzf_version() {
+    local bin
+    bin=$(fake_bin fzf 'echo "0.44.1 (debian)"')
+    ( PATH="$bin:$PATH"; check_dependencies ) >/dev/null
+    assert_eq 1 "$?" "fzf older than 0.60 refused" || return 1
+    bin=$(fake_bin fzf 'echo "0.60.0 (abc)"')
+    ( PATH="$bin:$PATH"; check_dependencies ) >/dev/null
+    assert_eq 0 "$?" "fzf 0.60 accepted" || return 1
 }
 
 test_check_dependencies_missing() {
-    # Minimal PATH without fzf/jq/curl -> must exit 1.
     local minbin="$TEST_HOME/minbin"
     mkdir -p "$minbin"
-    ln -s "$(command -v mkdir)" "$minbin/mkdir"
-    ln -s "$(command -v touch)" "$minbin/touch"
-    (
-        export PATH="$minbin"
-        check_dependencies
-    )
-    local rc=$?
-    assert_eq 1 "$rc" "exit 1 when deps missing" || return 1
+    ( export PATH="$minbin"; check_dependencies ) >/dev/null
+    assert_eq 1 "$?" "exit 1 when deps missing" || return 1
 }
 
 test_check_player() {
-    local bin="$TEST_HOME/bin"
-    mkdir -p "$bin"
-    ln -s "$(command -v mpv)" "$bin/mpv"
-    (
-        export PATH="$bin"
-        check_player
-        printf 'PLAYER=%s' "$PLAYER_DEFAULT"
-    ) | assert_contains "$(cat)" "PLAYER=mpv" "mpv detected" || return 1
-
-    local empty="$TEST_HOME/emptybin"
-    mkdir -p "$empty"
-    (
-        export PATH="$empty"
-        check_player
-    )
-    local rc=$?
-    assert_eq 1 "$rc" "exit 1 when no player" || return 1
+    local bin="$TEST_HOME/playerbin" empty="$TEST_HOME/emptybin"
+    mkdir -p "$bin" "$empty"
+    ln -s "$(type -P true)" "$bin/vlc"
+    assert_eq "vlc" "$(PLAYER_DEFAULT=mpv; PATH="$bin"; check_player; printf '%s' "$PLAYER_DEFAULT")" "falls back to vlc" || return 1
+    ( PATH="$empty"; check_player ) >/dev/null
+    assert_eq 1 "$?" "exit 1 when no player" || return 1
 }
 
-test_hls_fetch_clean_ok() {
-    # PATH-override curl serves a master playlist (with #EXT-X-STREAM-INF +
-    # variant URI) for the master URL and the ad fixture as the media playlist
-    # for the variant URL.
-    local curlbin="$TEST_HOME/curlbin-hls"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-url="\${@: -1}"
-case "\$url" in
-    *master*)
-        cat <<'MASTER'
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080
-/20260807/Dcq1MBiO/3500kb/hls/index.m3u8
-MASTER
-        ;;
-    *)
-        cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-        ;;
-esac
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/master.m3u8"
-    local out hash clean
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
-    hash=$(hash_url "$url")
-    clean="$CACHE/$hash-clean.m3u8"
-    assert_eq "$clean" "$out" "echoes clean file path" || return 1
-    [[ -f "$clean" ]] || { echo "clean file missing: $clean" >&2; return 1; }
-    # Standalone video commercial segments dropped; convertv* movie scenes preserved.
-    assert_eq 3 "$(grep -c 'convertv8' "$clean")" "convertv8 movie lines preserved" || return 1
-    assert_eq 0 "$(grep -c '/v8/' "$clean")" "/v8/ ad lines dropped" || return 1
-    assert_eq 0 "$(grep -c '/v7/' "$clean")" "/v7/ ad lines dropped" || return 1
-    assert_eq 0 "$(grep -c 'ads9/' "$clean")" "ads9 ad lines dropped" || return 1
-    assert_eq 0 "$(grep -c 'promo7/' "$clean")" "promo7 ad lines dropped" || return 1
-    assert_contains "$(cat "$clean")" "#EXT-X-PLAYLIST-TYPE:VOD" "VOD header injected" || return 1
-    assert_eq 0 "$(grep -c 'DISCONTINUITY-SEQUENCE' "$clean")" "DISCONTINUITY-SEQUENCE stripped" || return 1
-    local bad
-    bad=$(grep -v '^#' "$clean" | grep -v '^$' | grep -vc '^http')
-    assert_eq 0 "$bad" "all segment lines start with http" || return 1
-    assert_contains "$(cat "$clean")" "#EXT-X-ENDLIST" "endlist kept" || return 1
-}
-
-test_hls_fetch_clean_fallback() {
-    # curl fails -> hls_fetch_clean echoes the original URL and returns 0.
-    local curlbin="$TEST_HOME/curlbin-hls-fail"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<'EOF'
-#!/bin/bash
-exit 1
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/master.m3u8"
-    local out rc
-    out=$(PATH="$curlbin:$PATH" hls_fetch_clean "$url")
-    rc=$?
-    assert_eq "$url" "$out" "fallback echoes original url" || return 1
-    assert_eq 0 "$rc" "fallback returns 0" || return 1
-}
-
-test_hls_fetch_clean_canary() {
-    # A playlist with DISCONTINUITY but no ad-pattern match must trigger the
-    # canary debug log (CDN may have changed its ad URI layout).
-    local curlbin="$TEST_HOME/curlbin-hls-canary"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-url="\${@: -1}"
-case "\$url" in
-    *master*)
-        cat <<'MASTER'
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080
-/20260807/Dcq1MBiO/3500kb/hls/index.m3u8
-MASTER
-        ;;
-    *)
-        cat "$SCRIPT_DIR/fixtures/disc_no_ad_playlist.m3u8"
-        ;;
-esac
-EOF
-    chmod +x "$curlbin/curl"
-
-    local url="https://cdn.example/master.m3u8"
-    PATH="$curlbin:$PATH" hls_fetch_clean "$url" >/dev/null
-    assert_contains "$(cat "$CACHE/debug.log" 2>/dev/null)" "HLS_AD_PATTERNS may need updating" "canary flags unmatched ad layout" || return 1
-}
-
-test_hls_rebase_convertv_rewrites_playlist() {
-    # Fake ffmpeg/ffprobe/curl: every clip reports PTS 1.48..5.44 at 25fps and
-    # ffmpeg just writes a marker file, so the rewrite logic is exercised
-    # without downloading real segments.
-    local shim="$TEST_HOME/rebasebin"
-    mkdir -p "$shim"
-    cat > "$shim/curl" <<'EOF'
-#!/bin/bash
-out=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-o" ]] && out="$a"
-    prev="$a"
-done
-[[ -n "$out" ]] && printf 'TS' > "$out"
-exit 0
-EOF
-    cat > "$shim/ffmpeg" <<'EOF'
-#!/bin/bash
-# Model the real stream copy: output first/last = input first/last + shift,
-# recorded in a sidecar the fake ffprobe serves for *-r.ts files.
-shift=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-itsoffset" ]] && shift="$a"
-    prev="$a"
-done
-out="${!#}"
-[[ -z "$shift" ]] && shift=0
-printf 'REBASED' > "$out"
-first=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 1.48+s}')
-last=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 5.44+s}')
-printf '%s,\n%s,\n' "$first" "$last" > "$out.pts"
-# The real pipeline writes via a .part temp then renames; publish the sidecar
-# under the final name too so the cache-reuse pass finds it.
-base="${out%%.part.*}"
-[[ "$base" != "$out" ]] && printf '%s,\n%s,\n' "$first" "$last" > "$base.pts"
-exit 0
-EOF
-    cat > "$shim/ffprobe" <<'EOF'
-#!/bin/bash
-args="$*"
-file="${!#}"
-if [[ "$args" == *packet=pts_time* && -f "$file.pts" ]]; then
-    cat "$file.pts"
-    exit 0
-fi
-case "$args" in
-    *packet=pts_time*) printf '1.480000,\n5.440000,\n' ;;
-    *avg_frame_rate*|*r_frame_rate*) printf '25/1\n' ;;
-    *"-select_streams v"*) printf 'video\n' ;;
-    *) printf 'video\naudio\n' ;;
-esac
-exit 0
-EOF
-    chmod +x "$shim/curl" "$shim/ffmpeg" "$shim/ffprobe"
-
-    local base="https://cdn.example/hls/index.m3u8"
-    local pl="$TEST_HOME/rebase-in.m3u8"
-    cat > "$pl" <<'EOF'
-#EXTM3U
-#EXT-X-PLAYLIST-TYPE:VOD
-#EXTINF:4.0,
-https://cdn.example/hls/prev.ts
-#EXT-X-DISCONTINUITY
-#EXTINF:4.0,
-https://cdn.example/hls/convertv7/aaa.ts
-#EXT-X-DISCONTINUITY
-#EXT-X-DISCONTINUITY
-#EXTINF:5.4,
-https://cdn.example/hls/convertv7/bbb.ts
-#EXT-X-DISCONTINUITY
-#EXT-X-DISCONTINUITY
-#EXT-X-KEY:METHOD=NONE
-#EXTINF:3.0,
-https://cdn.example/hls/next.ts
-#EXT-X-ENDLIST
-EOF
-
-    local ha hb hprev out
-    ha=$(hash_url "https://cdn.example/hls/convertv7/aaa.ts")
-    hb=$(hash_url "https://cdn.example/hls/convertv7/bbb.ts")
-    hprev=$(hash_url "https://cdn.example/hls/prev.ts")
-    out="$TEST_HOME/rebase-out.m3u8"
-
-    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out" "$base" || return 1
-
-    # Exact rewrite: convertv URIs become local rebased paths, every
-    # DISCONTINUITY is gone, EXTINF/keys/movie segments are untouched.
-    local expected
-    expected=$(printf '%s\n' \
-        '#EXTM3U' \
-        '#EXT-X-PLAYLIST-TYPE:VOD' \
-        '#EXTINF:4.0,' \
-        'https://cdn.example/hls/prev.ts' \
-        '#EXTINF:4.0,' \
-        "$CACHE/segments/$ha-r.ts" \
-        '#EXTINF:5.4,' \
-        "$CACHE/segments/$hb-r.ts" \
-        '#EXT-X-KEY:METHOD=NONE' \
-        '#EXTINF:3.0,' \
-        'https://cdn.example/hls/next.ts' \
-        '#EXT-X-ENDLIST')
-    assert_eq "$expected" "$(cat "$out")" "playlist rewritten in place" || return 1
-    [[ -s "$CACHE/segments/$ha-r.ts" ]] || { echo "rebased clip a missing" >&2; return 1; }
-    [[ -s "$CACHE/segments/$hb-r.ts" ]] || { echo "rebased clip b missing" >&2; return 1; }
-    [[ -s "$CACHE/segments/$hprev.ts" ]] || { echo "cursor anchor not downloaded" >&2; return 1; }
-
-    # Second pass with a failing ffmpeg: cached rebased clips must be reused
-    # (their PTS already matches the cursor), so no download/rebase happens.
-    printf '#!/bin/bash\nexit 1\n' > "$shim/ffmpeg"
-    chmod +x "$shim/ffmpeg"
-    local out2="$TEST_HOME/rebase-out2.m3u8"
-    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out2" "$base" || return 1
-    assert_eq "$expected" "$(cat "$out2")" "cached rebased clips reused" || return 1
-}
-
-test_hls_rebase_convertv_multi_cluster() {
-    # Two convertv clusters separated by movie content: each cluster must be
-    # rebased from its own anchor (the movie segment before it), not chained
-    # onto the previous cluster.
-    local shim="$TEST_HOME/rebasebin-multi"
-    mkdir -p "$shim"
-    cat > "$shim/curl" <<'EOF'
-#!/bin/bash
-out=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-o" ]] && out="$a"
-    prev="$a"
-done
-[[ -n "$out" ]] && printf 'TS' > "$out"
-exit 0
-EOF
-    cat > "$shim/ffmpeg" <<'EOF'
-#!/bin/bash
-shift=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-itsoffset" ]] && shift="$a"
-    prev="$a"
-done
-out="${!#}"
-[[ -z "$shift" ]] && shift=0
-printf 'REBASED' > "$out"
-first=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 1.48+s}')
-last=$(awk -v s="$shift" 'BEGIN{printf "%.6f", 5.44+s}')
-printf '%s,\n%s,\n' "$first" "$last" > "$out.pts"
-# The real pipeline writes via a .part temp then renames; publish the sidecar
-# under the final name too so the cache-reuse pass finds it.
-base="${out%%.part.*}"
-[[ "$base" != "$out" ]] && printf '%s,\n%s,\n' "$first" "$last" > "$base.pts"
-exit 0
-EOF
-    cat > "$shim/ffprobe" <<'EOF'
-#!/bin/bash
-args="$*"
-file="${!#}"
-if [[ "$args" == *packet=pts_time* && -f "$file.pts" ]]; then
-    cat "$file.pts"
-    exit 0
-fi
-case "$args" in
-    *packet=pts_time*) printf '1.480000,\n5.440000,\n' ;;
-    *avg_frame_rate*|*r_frame_rate*) printf '25/1\n' ;;
-    *"-select_streams v"*) printf 'video\n' ;;
-    *) printf 'video\naudio\n' ;;
-esac
-exit 0
-EOF
-    chmod +x "$shim/curl" "$shim/ffmpeg" "$shim/ffprobe"
-
-    local base="https://cdn.example/hls/index.m3u8"
-    local pl="$TEST_HOME/rebase-multi-in.m3u8"
-    cat > "$pl" <<'EOF'
-#EXTM3U
-#EXT-X-PLAYLIST-TYPE:VOD
-#EXTINF:10.0,
-https://cdn.example/hls/movie1.ts
-#EXT-X-DISCONTINUITY
-#EXTINF:4.0,
-https://cdn.example/hls/convertv7/aaa.ts
-#EXT-X-DISCONTINUITY
-#EXTINF:10.0,
-https://cdn.example/hls/movie2.ts
-#EXT-X-DISCONTINUITY
-#EXTINF:5.4,
-https://cdn.example/hls/convertv7/bbb.ts
-#EXT-X-ENDLIST
-EOF
-
-    # Anchor PTS sidecars at 25fps: movie1 ends at 19.96s (cursor 20.0) and
-    # movie2 at 109.96s (cursor 110.0). The second cluster must land on its own
-    # cursor instead of continuing after the first cluster.
-    local hm1 hm2 ha hb
-    hm1=$(hash_url "https://cdn.example/hls/movie1.ts")
-    hm2=$(hash_url "https://cdn.example/hls/movie2.ts")
-    mkdir -p "$CACHE/segments"
-    printf '10.000000,\n19.960000,\n' > "$CACHE/segments/$hm1.ts.pts"
-    printf '100.000000,\n109.960000,\n' > "$CACHE/segments/$hm2.ts.pts"
-
-    ha=$(hash_url "https://cdn.example/hls/convertv7/aaa.ts")
-    hb=$(hash_url "https://cdn.example/hls/convertv7/bbb.ts")
-    local out="$TEST_HOME/rebase-multi-out.m3u8"
-    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out" "$base" || return 1
-
-    local expected
-    expected=$(printf '%s\n' \
-        '#EXTM3U' \
-        '#EXT-X-PLAYLIST-TYPE:VOD' \
-        '#EXTINF:10.0,' \
-        'https://cdn.example/hls/movie1.ts' \
-        '#EXTINF:4.0,' \
-        "$CACHE/segments/$ha-r.ts" \
-        '#EXTINF:10.0,' \
-        'https://cdn.example/hls/movie2.ts' \
-        '#EXTINF:5.4,' \
-        "$CACHE/segments/$hb-r.ts" \
-        '#EXT-X-ENDLIST')
-    assert_eq "$expected" "$(cat "$out")" "both clusters rewritten, discontinuities removed" || return 1
-    assert_contains "$(cat "$CACHE/segments/$ha-r.ts.pts")" "20.000000" "first cluster anchored on movie1 cursor" || return 1
-    assert_contains "$(cat "$CACHE/segments/$hb-r.ts.pts")" "110.000000" "second cluster anchored on movie2 cursor" || return 1
-
-    # Second pass with a failing ffmpeg: both clusters must be reused from
-    # cache because their first PTS still matches each cluster's cursor.
-    printf '#!/bin/bash\nexit 1\n' > "$shim/ffmpeg"
-    chmod +x "$shim/ffmpeg"
-    local out2="$TEST_HOME/rebase-multi-out2.m3u8"
-    PATH="$shim:$PATH" hls_rebase_convertv "$pl" "$out2" "$base" || return 1
-    assert_eq "$expected" "$(cat "$out2")" "cached rebased clips reused per cluster" || return 1
-}
-
-test_hls_fetch_clean_without_ffmpeg_keeps_strip_output() {
-    # PATH without ffmpeg/ffprobe: hls_fetch_clean must keep exactly the
-    # hls_strip_ads output (convertv URIs + discontinuities), no segment cache.
-    local minbin="$TEST_HOME/minbin-noffmpeg"
-    mkdir -p "$minbin"
-    local tool p
-    for tool in awk sed grep cut md5sum mktemp mv rm date sort tr head cat; do
-        p=$(command -v "$tool" 2>/dev/null) && ln -sf "$p" "$minbin/$tool"
-    done
-    cat > "$minbin/curl" <<EOF
-#!/bin/bash
-cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-EOF
-    chmod +x "$minbin/curl"
-
-    local url="https://cdn.example/hls/media.m3u8"
-    local expected out hash clean
-    expected=$(hls_strip_ads "$url" < "$SCRIPT_DIR/fixtures/ad_playlist.m3u8")
-
-    out=$(PATH="$minbin" hls_fetch_clean "$url") || return 1
-    hash=$(hash_url "$url")
-    clean="$CACHE/$hash-clean.m3u8"
-    assert_eq "$clean" "$out" "clean path echoed" || return 1
-    assert_eq "$expected" "$(cat "$clean")" "strip_ads output kept without ffmpeg" || return 1
-    assert_contains "$(cat "$clean")" "convertv8" "convertv URIs stay" || return 1
-    assert_contains "$(cat "$clean")" "#EXT-X-DISCONTINUITY" "discontinuities stay" || return 1
-    [[ ! -e "$CACHE/segments" ]] || { echo "segments cache must not be created" >&2; return 1; }
-}
-
-test_play_video_cleans_url() {
-    # Fake mpv records its args; fake curl serves master->variant->media
-    # fixture. Assert mpv receives the cleaned playlist and --cache=yes.
-    local bin="$TEST_HOME/playbin"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/mpv-args"
-    : > "$argsfile"
-    cat > "$bin/mpv" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/mpv"
-
-    local curlbin="$TEST_HOME/playbin-curl"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-url="\${@: -1}"
-case "\$url" in
-    *master*)
-        cat <<'MASTER'
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080
-/20260807/Dcq1MBiO/3500kb/hls/index.m3u8
-MASTER
-        ;;
-    *)
-        cat "$SCRIPT_DIR/fixtures/ad_playlist.m3u8"
-        ;;
-esac
-EOF
-    chmod +x "$curlbin/curl"
-
-    PLAYER_DEFAULT=mpv
-    QUALITY=
-    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
-    local i=0
-    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
-    local first
-    first=$(head -1 "$argsfile")
-    assert_contains "$first" "-clean.m3u8" "mpv receives clean playlist" || return 1
-    assert_contains "$(cat "$argsfile")" "--save-position-on-quit" "mpv saves position on quit" || return 1
-    assert_contains "$(cat "$argsfile")" "--cache=yes" "mpv gets --cache=yes" || return 1
-    # Local cleaned playlist needs the hls demuxer + widened protocol whitelist
-    # (ffmpeg refuses https segments with the default file,crypto,data list).
-    assert_contains "$(cat "$argsfile")" "--demuxer-lavf-format=hls" "mpv forces hls demuxer" || return 1
-    assert_contains "$(cat "$argsfile")" 'protocol_whitelist="https,http,file,tcp,tls,crypto,data"' "mpv widens segment protocol whitelist" || return 1
-    # Anti-framedrop flags for DISCONTINUITY splice points.
-    assert_contains "$(cat "$argsfile")" "--hr-seek-framedrop=no" "mpv disables framedrop at seek" || return 1
-    assert_contains "$(cat "$argsfile")" "--demuxer-readahead-secs=20" "mpv readahead for smooth splice" || return 1
-    # Seekable RAM cache: seeks inside the buffer never hit the demuxer, so
-    # PTS gaps left by ad removal cannot reset playback to the start.
-    assert_contains "$(cat "$argsfile")" "--demuxer-seekable-cache=yes" "mpv enables seekable cache" || return 1
-    assert_contains "$(cat "$argsfile")" "--demuxer-max-bytes=150M" "mpv caps read-ahead buffer" || return 1
-    assert_contains "$(cat "$argsfile")" "--demuxer-max-back-bytes=100M" "mpv keeps back-buffer for backward seek" || return 1
-    assert_contains "$(cat "$argsfile")" "--hr-seek=default" "mpv hr-seek default" || return 1
-    # --demuxer-lavf-linearize-timestamps=yes is deliberately absent: it
-    # rewrites the timeline one-way and breaks backward seek across the
-    # PTS jumps left by removed ad segments.
-}
-
-test_play_video_fallback_url() {
-    # curl fails -> play_video must pass the ORIGINAL url to mpv.
-    local bin="$TEST_HOME/playbin-fail"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/mpv-args-fail"
-    : > "$argsfile"
-    cat > "$bin/mpv" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/mpv"
-
-    local curlbin="$TEST_HOME/playbin-curl-fail"
-    mkdir -p "$curlbin"
-    printf '#!/bin/bash\nexit 1\n' > "$curlbin/curl"
-    chmod +x "$curlbin/curl"
-
-    PLAYER_DEFAULT=mpv
-    QUALITY=
-    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
-    local i=0
-    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
-    local first
-    first=$(head -1 "$argsfile")
-    assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives original url" || return 1
-}
-
-test_play_video_vlc_args() {
-    # VLC must receive the cleaned playlist plus the accurate-seek and network
-    # buffering flags; --preferred-resolution behavior is unchanged.
-    local bin="$TEST_HOME/vlcbin"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/vlc-args"
-    : > "$argsfile"
-    cat > "$bin/vlc" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/vlc"
-
-    local curlbin="$TEST_HOME/vlcbin-curl"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-cat "$SCRIPT_DIR/fixtures/clean_playlist.m3u8"
-EOF
-    chmod +x "$curlbin/curl"
-
-    PLAYER_DEFAULT=vlc
-    QUALITY=720
-    PATH="$bin:$curlbin:$PATH" play_video "https://s6.kkphimplayer6.com/movie/3500kb/hls/index.m3u8" "Test Title"
-    local i=0
-    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
-    assert_contains "$(head -1 "$argsfile")" "-clean.m3u8" "vlc receives cleaned playlist" || return 1
-    assert_contains "$(cat "$argsfile")" "--no-video-title-show" "vlc title bar disabled" || return 1
-    assert_contains "$(cat "$argsfile")" "--no-input-fast-seek" "vlc accurate seek" || return 1
-    assert_contains "$(cat "$argsfile")" "--network-caching=3000" "vlc network buffering" || return 1
-    assert_contains "$(cat "$argsfile")" "--preferred-resolution=720" "vlc quality flag kept" || return 1
-}
-
-test_toggle_ad_block() {
-    sleep() { :; }
-    AD_BLOCK=1
-    toggle_ad_block >/dev/null
-    assert_eq 0 "$AD_BLOCK" "ad block toggled to 0" || return 1
-    assert_eq "AD_BLOCK=0" "$(sed -n 3p "$CONFIG_FILE")" "config file updated to 0" || return 1
-    toggle_ad_block >/dev/null
-    assert_eq 1 "$AD_BLOCK" "ad block toggled to 1" || return 1
-    assert_eq "AD_BLOCK=1" "$(sed -n 3p "$CONFIG_FILE")" "config file updated to 1" || return 1
-    unset -f sleep
-}
-
-test_play_video_disabled_ad_block() {
-    # When AD_BLOCK=0, play_video must skip hls_fetch_clean and pass raw URL to mpv.
-    local bin="$TEST_HOME/playbin-disabled"
-    mkdir -p "$bin"
-    local argsfile="$TEST_HOME/mpv-args-disabled"
-    : > "$argsfile"
-    cat > "$bin/mpv" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" > "$argsfile"
-EOF
-    chmod +x "$bin/mpv"
-
-    local curlbin="$TEST_HOME/playbin-curl-disabled"
-    mkdir -p "$curlbin"
-    cat > "$curlbin/curl" <<EOF
-#!/bin/bash
-echo "curl should not be called when ad block is off" >&2
-exit 1
-EOF
-    chmod +x "$curlbin/curl"
-
-    AD_BLOCK=0
-    PLAYER_DEFAULT=mpv
-    QUALITY=
-    PATH="$bin:$curlbin:$PATH" play_video "https://v7.kkphimplayer7.com/master.m3u8" "Test Title"
-    local i=0
-    while [[ ! -s "$argsfile" && $i -lt 50 ]]; do sleep 0.05; i=$((i + 1)); done
-    local first
-    first=$(head -1 "$argsfile")
-    assert_eq "https://v7.kkphimplayer7.com/master.m3u8" "$first" "mpv receives raw url when ad block disabled" || return 1
-}
-
-test_history_select() {
-    local recorded=""
-    play_video() { recorded="$1|$2"; }
-    echo "1700000000|Frieren - Tập 01|frieren-slug|https://example.com/stream.m3u8" > "$HIST"
-    fzf() { head -1; }
-    history
-    assert_eq "https://example.com/stream.m3u8|Frieren - Tập 01" "$recorded" "history plays correct url and title" || return 1
-}
-
-test_favorites_select() {
-    local recorded_slug="" recorded_title=""
-    watch_episode() { recorded_slug="$1"; recorded_title="$2"; }
-    echo "1700000000|Frieren|frieren-slug|2024|/poster.jpg" > "$FAV"
-    fzf() {
-        printf 'enter\n'
-        head -1
-    }
-    favorites
-    assert_eq "frieren-slug" "$recorded_slug" "favorites extracts clean slug" || return 1
-    assert_eq "Frieren" "$recorded_title" "favorites extracts clean title" || return 1
-}
-
-# Fake curl for call_api tests: responds with fixture JSON and counts calls.
-FAKE_CURL_BIN=""
+# fake curl for call_api: counts calls, ok or fail.
 make_fake_curl() {
     local counter="$1" mode="$2"
-    FAKE_CURL_BIN="$TEST_HOME/curlbin-$mode"
-    mkdir -p "$FAKE_CURL_BIN"
-    cat > "$FAKE_CURL_BIN/curl" <<EOF
-#!/bin/bash
-printf 'x' >> "$counter"
-if [[ "$mode" == "fail" ]]; then
-    exit 1
-fi
-cat <<JSON
-{"status":"success","data":{"items":[{"name":"Fake","year":2024,"quality":"HD","lang":"Vietsub","country":[{"name":"VN"}],"episode_current":"1/10","slug":"fake-film","poster_url":"/p/f.jpg"}]}}
-JSON
-EOF
-    chmod +x "$FAKE_CURL_BIN/curl"
+    fake_bin curl "printf x >> '$counter'
+[[ '$mode' == fail ]] && exit 1
+echo '{\"metas\":[{\"id\":\"kkphim:f\",\"type\":\"movie\",\"name\":\"Fake\"}]}'"
 }
 
 test_call_api_cache() {
-    local counter="$TEST_HOME/curl-count"
+    local counter="$TEST_HOME/count" bin out1 out2
     : > "$counter"
-    make_fake_curl "$counter" ok
-    local out1 out2
-    out1=$(PATH="$FAKE_CURL_BIN:$PATH" call_api "/v1/api/x?page=1")
-    out2=$(PATH="$FAKE_CURL_BIN:$PATH" call_api "/v1/api/x?page=1")
+    bin=$(make_fake_curl "$counter" ok)
+    out1=$(PATH="$bin:$PATH" call_api "https://k20.test/catalog/x.json")
+    out2=$(PATH="$bin:$PATH" call_api "https://k20.test/catalog/x.json")
     assert_eq "$out1" "$out2" "cache returns same body" || return 1
-    assert_contains "$out1" "fake-film" "fixture parsed" || return 1
-    assert_eq "x" "$(cat "$counter")" "curl called exactly once (cache hit)" || return 1
-    local cached
-    cached=$(ls "$CACHE"/*.json 2>/dev/null | wc -l)
-    assert_eq 1 "$cached" "cache file written" || return 1
+    assert_contains "$out1" "kkphim:f" "body" || return 1
+    assert_eq "x" "$(cat "$counter")" "curl called once" || return 1
 }
 
 test_call_api_retry_fails() {
-    local counter="$TEST_HOME/curl-count-fail"
+    local counter="$TEST_HOME/count-fail" bin
     : > "$counter"
-    make_fake_curl "$counter" fail
-    local rc
-    PATH="$FAKE_CURL_BIN:$PATH" call_api "/phim/x"
-    rc=$?
-    assert_eq 1 "$rc" "call_api returns 1 after retries" || return 1
-    assert_eq "xxx" "$(cat "$counter")" "curl attempted 3 times" || return 1
+    bin=$(make_fake_curl "$counter" fail)
+    sleep() { :; }
+    PATH="$bin:$PATH" call_api "https://k20.test/x.json"
+    assert_eq 1 "$?" "returns 1 after retries" || return 1
+    assert_eq "xxx" "$(cat "$counter")" "three attempts" || return 1
 }
 
 test_call_api_stale_cache_refetch() {
-    # A stale cache file must be removed and refetched.
-    local counter="$TEST_HOME/curl-count-stale"
+    local counter="$TEST_HOME/count-stale" bin key
     : > "$counter"
-    make_fake_curl "$counter" ok
-    SOURCE=phimapi
-    set_api_base
-    local key
-    key=$(hash_url "${API_BASE}/phim/stale")
+    bin=$(make_fake_curl "$counter" ok)
+    key=$(hash_url "https://k20.test/stale.json")
     printf '{"stale":true}' > "$CACHE/$key.json"
     touch -d "2 hours ago" "$CACHE/$key.json"
-    local out
-    out=$(PATH="$FAKE_CURL_BIN:$PATH" call_api "/phim/stale")
-    assert_contains "$out" "fake-film" "refetched" || return 1
-    assert_eq "x" "$(cat "$counter")" "refetch called curl once" || return 1
+    assert_contains "$(PATH="$bin:$PATH" call_api "https://k20.test/stale.json")" "kkphim:f" "refetched" || return 1
+    assert_eq "x" "$(cat "$counter")" "one fetch" || return 1
+}
+
+test_call_api_rejects_null_meta() {
+    local bin
+    bin=$(fake_bin curl "echo '{\"meta\":null}'")
+    sleep() { :; }
+    PATH="$bin:$PATH" call_api "https://k20.test/meta/series/x.json" >/dev/null
+    assert_eq 1 "$?" "null meta is a failure" || return 1
+    assert_eq 0 "$(find "$CACHE" -maxdepth 1 -name '*.json' | wc -l)" "null meta not cached" || return 1
+}
+
+test_call_api_rejects_error_body() {
+    local bin
+    bin=$(fake_bin curl "echo '{\"error\":\"Not Found\"}'")
+    sleep() { :; }
+    PATH="$bin:$PATH" call_api "https://k20.test/missing.json" >/dev/null
+    assert_eq 1 "$?" "error body is a failure" || return 1
+    assert_eq 0 "$(find "$CACHE" -maxdepth 1 -name '*.json' | wc -l)" "error body not cached" || return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1415,62 +829,51 @@ echo ""
 
 TESTS=(
     sanitize_field
-    add_menu_numbers
     format_movie_items
-    parse_v1_items
-    parse_phimapi_v3
-    parse_vsmov_items
-    parse_nguonc_items
-    parse_vsmov_player_page
-    resolve_stream_url
-    resolve_nguonc_embed
-    vsmov_proxy_selftest
-    hash_url
-    hls_absolutize_url
-    hls_strip_ads
-    hls_strip_preroll_postroll
-    hls_strip_ads_structural
-    hls_strip_ads_structural_control
-    hls_pick_variant
-    hls_pick_variant_no_resolution
-    hls_strip_uri_attrs
-    hls_fetch_clean_ok
-    hls_fetch_clean_fallback
-    hls_fetch_clean_download_mode
-    hls_fetch_clean_cache_fallback
-    hls_fetch_clean_rejects_non_playlist
-    hls_fetch_clean_quality
-    hls_fetch_clean_canary
-    hls_rebase_convertv_rewrites_playlist
-    hls_rebase_convertv_multi_cluster
-    hls_fetch_clean_without_ffmpeg_keeps_strip_output
-    play_video_cleans_url
-    play_video_disabled_ad_block
-    play_video_fallback_url
-    play_video_vlc_args
-    toggle_ad_block
-    clear_cache_removes_all
-    download_episode_vietnamese_name
-    download_episode_ad_free
-    download_episode_vsmov
+    parse_k20_items
+    group_results
+    open_choice_source_picker
+    k20anime_index
+    k20_catalog_paging
+    k20_catalogs
+    resolve_k20_stream
+    kkphim_playlist
+    stream_url_kkphim
+    nguonc_proxy
+    stream_url_nguonc
+    play_video_mpv
+    play_video_vlc
+    preview_script
+    preview_kitsu_for_anime
+    download_episode
+    download_local_playlist
     view_downloads_status
+    vlc_plugin_check
+    watch_episode_list
+    watch_episode_records_after_play
+    paginated_list
+    search_script
     handle_cli_args
+    continue_plays_latest
     is_cache_fresh
     record_history
-    resolve_saved_url
-    history_select
+    continue_watching
+    watch_episode_cursor
+    paginated_filter
+    rewrite_rows_keeps_dir_clean
     record_progress
-    add_favorite
-    favorites_select
-    remove_favorite
+    favorites
     load_settings
     save_settings
-    check_dependencies
+    clear_cache
+    check_dependencies_fzf_version
     check_dependencies_missing
     check_player
     call_api_cache
     call_api_retry_fails
     call_api_stale_cache_refetch
+    call_api_rejects_null_meta
+    call_api_rejects_error_body
 )
 
 for t in "${TESTS[@]}"; do

@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends jq curl fzf mpv shellcheck
+          sudo apt-get install -y --no-install-recommends jq curl fzf shellcheck
 
       - name: Syntax check
         run: |
