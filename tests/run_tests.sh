@@ -639,6 +639,11 @@ test_watch_episode_cursor() {
     watch_episode "series/kkphim:x" "X" k20 >/dev/null
     assert_contains "$(cat "$TEST_HOME/fzf-args")" "load:pos(3)" "last episode watched: stays on it" || return 1
     assert_contains "$(cat "$TEST_HOME/fzf-args")" "✓ Đã xem: Tập 3" "header says it was watched" || return 1
+
+    record_progress "series/kkphim:x" "Tập 01"
+    watch_episode "series/kkphim:x" "X" k20 >/dev/null
+    assert_contains "$(cat "$TEST_HOME/fzf-args")" "load:pos(1)" "unknown saved episode: first episode" || return 1
+    if grep -q "Đã xem\|Tiếp:" "$TEST_HOME/fzf-args"; then echo "no claim for an episode that is not listed" >&2; return 1; fi
 }
 
 test_paginated_filter() {
@@ -742,6 +747,9 @@ test_check_dependencies_fzf_version() {
     bin=$(fake_bin fzf 'echo "0.60.0 (abc)"')
     ( PATH="$bin:$PATH"; check_dependencies ) >/dev/null
     assert_eq 0 "$?" "fzf 0.60 accepted" || return 1
+    assert_eq "--wrap" "$(PATH="$bin:$PATH"; check_dependencies; printf '%s' "${FZF_OPTS[-1]}")" "0.60 wraps by character" || return 1
+    bin=$(fake_bin fzf 'echo "0.75.0 (abc)"')
+    assert_eq "--wrap=word" "$(PATH="$bin:$PATH"; check_dependencies; printf '%s' "${FZF_OPTS[-1]}")" "0.68+ wraps whole words" || return 1
 }
 
 test_check_dependencies_missing() {

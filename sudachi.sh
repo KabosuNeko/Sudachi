@@ -103,7 +103,9 @@ FZF_OPTS=(
     "--padding=0,1"
     "--layout=reverse-list"
     "--info=inline"
-    "--preview-window=right:50%:rounded:wrap"
+    # noinfo keeps the preview's scroll counter off the end of the title line;
+    # list wrapping is added by check_dependencies, which knows the fzf version.
+    "--preview-window=right:50%:rounded:wrap:noinfo"
     "--preview-label= 󰟴 Chi tiết "
 
     "--pointer=❯ "
@@ -135,6 +137,12 @@ check_dependencies() {
             echo -e "${C_Y}⚠ fzf ${fzf_version} quá cũ, Sudachi cần fzf >= 0.60.${C_R}"
             echo -e "${C_C}  Tải bản mới: https://github.com/junegunn/fzf/releases${C_R}"
             exit 1
+        fi
+        # Long titles wrap instead of ending in "…"; whole words since fzf 0.68.
+        if [[ "$(printf '0.68\n%s\n' "$fzf_version" | sort -V | head -1)" == "0.68" ]]; then
+            FZF_OPTS+=("--wrap=word")
+        else
+            FZF_OPTS+=("--wrap")
         fi
         return
     fi
@@ -897,17 +905,21 @@ watch_episode() {
         last_ep=$(awk -F'|' -v s="$slug" '$1 == s {ep=$2} END {print ep}' "$PROGRESS")
         if [[ -n "$last_ep" ]]; then
             pos=$(awk -F'|' -v e="$last_ep" '$1 == e {n = NR} END {print n + 0}' <<< "$ds_tap")
-            if (( pos > 0 && pos < total )); then
-                pos=$((pos + 1))
-                next="▶ Tiếp"
+            if (( pos == 0 )); then
+                # The saved episode name is no longer listed (renamed): no claim.
+                pos=1
             else
-                (( pos == 0 )) && pos=1
-                next="✓ Đã xem"
+                if (( pos < total )); then
+                    pos=$((pos + 1))
+                    next="▶ Tiếp"
+                else
+                    next="✓ Đã xem"
+                fi
+                tap=$(sed -n "${pos}p" <<< "$ds_tap")
+                tap="${tap%%|*}"
+                [[ "$tap" =~ ^[0-9]+$ ]] && tap="Tập $tap"
+                continue_header="  │  $next: $tap"
             fi
-            tap=$(sed -n "${pos}p" <<< "$ds_tap")
-            tap="${tap%%|*}"
-            [[ "$tap" =~ ^[0-9]+$ ]] && tap="Tập $tap"
-            continue_header="  │  $next: $tap"
         fi
         chon=$(fzf "${FZF_OPTS[@]}" \
             --header="$ten$continue_header  │  Enter xem  │  Tab tải  │  Ctrl+F yêu thích" \

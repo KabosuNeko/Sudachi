@@ -22,7 +22,9 @@ No build step. Validate: `bash -n sudachi.sh`, `shellcheck -S warning sudachi.sh
 
 ## Dependencies
 
-Linux only (GNU `stat -c`, `md5sum`, `sort -V`), bash >= 4.3, fzf >= 0.60 (`--with-nth='{1}'` templates; `check_dependencies` refuses older fzf).
+Linux only (GNU `stat -c`, `md5sum`, `sort -V`), bash >= 4.3, fzf >= 0.60 (`--with-nth='{1}'` templates; `check_dependencies` refuses older fzf and adds
+`--wrap=word` on fzf >= 0.68, `--wrap` below, so long titles wrap instead of ending in "…";
+the preview window uses `noinfo` so its scroll counter does not cover the title).
 
 | Required | Purpose |
 |----------|---------|
